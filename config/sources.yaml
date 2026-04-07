@@ -1,0 +1,60 @@
+# ============================================================
+# Configuration des sources d'offres d'emploi
+# ============================================================
+
+adzuna:
+  # URL de base de l'API Adzuna
+  base_url: "https://api.adzuna.com"
+
+  # ──────────────────────────────────────────
+  # Cibles de recherche — pays + localisation
+  # Codes pays supportés : fr, gb, us, de, nl, be, ch, es, it, au, ca
+  # ──────────────────────────────────────────
+  cibles:
+    - pays: "fr"
+      localisation: "Paris"
+      mots_cles:
+        - "Ingénieur IA"
+        - "AI Engineer"
+    - pays: "fr"
+      localisation: "Lyon"
+      mots_cles:
+        - "Ingénieur IA"
+        - "AI Engineer"
+    - pays: "be"
+      localisation: "Brussels"
+      mots_cles:
+        - "AI Engineer"
+        - "Ingénieur IA"
+    - pays: "ch"
+      localisation: "Geneva"
+      mots_cles:
+        - "AI Engineer"
+        - "Ingénieur IA"
+    - pays: "nl"
+      localisation: "Amsterdam"
+      mots_cles:
+        - "AI Engineer"
+        - "Machine Learning Engineer"
+    - pays: "es"
+      localisation: "Madrid"
+      mots_cles:
+        - "AI Engineer"
+        - "Machine Learning"
+    - pays: "es"
+      localisation: "Barcelona"
+      mots_cles:
+        - "AI Engineer"
+        - "Machine Learning"
+    # Portugal non supporté par Adzuna
+    # - pays: "pt"
+    #   localisation: "Lisbon"
+
+
+  # Paramètres de recherche par défaut
+  search_params:
+    # Nombre maximum d'offres à récupérer PAR cible
+    max_results_par_cible: 25
+
+  # Paramètres HTTP
+  timeout_seconds: 30
