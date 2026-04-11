@@ -58,6 +58,19 @@ def init_db(db_path: str = DB_PATH_DEFAUT) -> None:
             "CREATE INDEX IF NOT EXISTS idx_score ON offres(score DESC)"
         )
 
+        # Contrainte d'unicité sur l'URL (prévient les doublons cross-sources)
+        # On déduplique d'abord les lignes existantes (garde le rowid le plus bas)
+        # pour que la création de l'index unique ne lève pas IntegrityError.
+        conn.execute("""
+            DELETE FROM offres
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid) FROM offres GROUP BY url
+            )
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_url ON offres(url)"
+        )
+
         conn.commit()
 
 

@@ -21,6 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import TypedDict, Optional
+from urllib.parse import quote
 
 import yaml
 from dotenv import load_dotenv
@@ -67,6 +68,27 @@ class AgentState(TypedDict):
 # Helpers de scraping (sources externes)
 # ─────────────────────────────────────────────
 
+def _filtrer_urls_existantes(offres_db: list[dict], db_path: str) -> list[dict]:
+    """
+    Retire de offres_db les entrées dont l'URL est déjà présente en base.
+    Évite les doublons cross-sources avant même l'INSERT.
+    """
+    if not offres_db:
+        return []
+    with get_connection(db_path) as conn:
+        nouvelles = []
+        for offre in offres_db:
+            url = offre.get("url", "")
+            if not url:
+                continue
+            existe = conn.execute(
+                "SELECT 1 FROM offres WHERE url = ? LIMIT 1", (url,)
+            ).fetchone()
+            if not existe:
+                nouvelles.append(offre)
+    return nouvelles
+
+
 def _scraper_adzuna(app_id: str, app_key: str, profil: dict, sources: dict, db_path: str) -> int:
     """Collecte Adzuna (logique d'origine). Sauvegarde directement en DB et retourne le count."""
     config_adzuna = sources["adzuna"]
@@ -98,6 +120,7 @@ def _scraper_adzuna(app_id: str, app_key: str, profil: dict, sources: dict, db_p
             for o in offres_par_id.values()
             if not contient_deal_breaker(o, deal_breakers)
         ]
+        offres_normalisees = _filtrer_urls_existantes(offres_normalisees, db_path)
         total += sauvegarder_offres(offres_normalisees, db_path)
         time.sleep(1)
 
@@ -123,7 +146,13 @@ def _scraper_apec(search_term: str, location: str, apify_token: str) -> list[dic
     run_resp = _req.post(
         f"{base}/acts/{actor_id}/runs",
         params={"token": apify_token},
-        json={"keywords": search_term, "location": location},
+        json={
+            "searchUrl": (
+                "https://www.apec.fr/candidat/recherche-emploi.html/emploi"
+                f"?motsCles={quote(search_term)}"
+            ),
+            "maxResults": 50,
+        },
         headers=headers,
         timeout=30,
     )
@@ -132,8 +161,8 @@ def _scraper_apec(search_term: str, location: str, apify_token: str) -> list[dic
     run_id = run_data.get("id")
     dataset_id = run_data.get("defaultDatasetId")
 
-    # Polling jusqu'à SUCCEEDED (max 120 s)
-    for _ in range(24):
+    # Polling jusqu'à SUCCEEDED (max 180 s)
+    for _ in range(36):
         time.sleep(5)
         status_resp = _req.get(
             f"{base}/actor-runs/{run_id}",
@@ -174,9 +203,15 @@ def _scraper_apec(search_term: str, location: str, apify_token: str) -> list[dic
     return offres
 
 
-def _scraper_indeed(search_term: str, location: str) -> list[dict]:
+def _scraper_indeed(
+    search_term: str,
+    location: str,
+    results_wanted: int = 50,
+    hours_old: int = 72,
+) -> list[dict]:
     """
     Scrape Indeed via jobspy et retourne les offres au format unifié.
+    results_wanted et hours_old sont lus depuis sources.yaml (section indeed).
     Retourne [] en cas d'erreur (package absent, réseau, etc.).
     """
     try:
@@ -189,8 +224,8 @@ def _scraper_indeed(search_term: str, location: str) -> list[dict]:
         site_name=["indeed"],
         search_term=search_term,
         location=location,
-        results_wanted=20,
-        hours_old=72,
+        results_wanted=results_wanted,
+        hours_old=hours_old,
         country_indeed="France",
     )
 
@@ -249,6 +284,11 @@ def collecter(state: AgentState) -> AgentState:
     search_term = profil["candidat"]["poste_cible"]
     deal_breakers = profil.get("deal_breakers", [])
 
+    # Paramètres Indeed depuis sources.yaml (section indeed)
+    indeed_cfg = sources.get("indeed", {})
+    indeed_results_wanted = indeed_cfg.get("results_wanted", 50)
+    indeed_hours_old = indeed_cfg.get("hours_old", 72)
+
     init_db(db_path)
 
     # Lancer les trois scrapers en parallèle
@@ -256,7 +296,10 @@ def collecter(state: AgentState) -> AgentState:
         futures = {
             executor.submit(_scraper_adzuna, app_id, app_key, profil, sources, db_path): "adzuna",
             executor.submit(_scraper_apec, search_term, "France", apify_token): "apec",
-            executor.submit(_scraper_indeed, search_term, "France"): "indeed",
+            executor.submit(
+                _scraper_indeed, search_term, "France",
+                indeed_results_wanted, indeed_hours_old,
+            ): "indeed",
         }
         offres_adzuna_nouvelles = 0
         offres_externes: list[dict] = []
@@ -286,13 +329,15 @@ def collecter(state: AgentState) -> AgentState:
             seen_urls.add(url)
             offres_dedupliquees.append(o)
 
-    # Filtrage deal-breakers + normalisation DB + sauvegarde
+    # Filtrage deal-breakers + normalisation DB
     offres_db = []
     for o in offres_dedupliquees:
         texte = f"{o.get('titre', '')} {o.get('description', '')}".lower()
         if not any(db_kw.lower() in texte for db_kw in deal_breakers):
             offres_db.append(_unifier_vers_db(o))
 
+    # Pré-filtre anti-doublons URL (inclut les offres Adzuna déjà insérées)
+    offres_db = _filtrer_urls_existantes(offres_db, db_path)
     nouvelles_externes = sauvegarder_offres(offres_db, db_path)
     total_nouvelles = offres_adzuna_nouvelles + nouvelles_externes
     console.print(f"[green]✓[/green] {total_nouvelles} nouvelles offres collectées au total")

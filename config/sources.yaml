@@ -58,3 +58,14 @@ adzuna:
 
   # Paramètres HTTP
   timeout_seconds: 30
+
+
+# ============================================================
+# Configuration Indeed (via JobSpy)
+# ============================================================
+
+indeed:
+  # Nombre d'offres à récupérer
+  results_wanted: 50
+  # Âge maximum des offres en heures
+  hours_old: 72
