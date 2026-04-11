@@ -1,15 +1,15 @@
 """
-Scorer d'offres d'emploi via Google AI Studio (Gemini).
+Scorer d'offres d'emploi via LangChain + Google Gemini.
 
 Utilisation :
     python src/scorer.py              # Score les 20 prochaines offres non scorées
     python src/scorer.py --limite 50  # Score jusqu'à 50 offres
     python src/scorer.py --rescorer   # Rescorer les offres en erreur (score=-1)
 
-Ce script :
-1. Récupère les offres non scorées depuis SQLite
-2. Envoie chaque offre + profil à Gemini pour évaluation
-3. Met à jour le score et l'explication dans la base de données
+Changement vs version précédente :
+    - google-genai (SDK brut) → LangChain (ChatGoogleGenerativeAI)
+    - json.loads() manuel → Pydantic ScoringResult (validation automatique)
+    - Le modèle déclare ce qu'il attend, LangChain s'occupe du reste
 """
 
 import argparse
@@ -18,10 +18,11 @@ import os
 import sys
 import time
 
-from google import genai
-from google.genai import types
 import yaml
 from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import SystemMessage, HumanMessage
+from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
 
@@ -33,20 +34,31 @@ load_dotenv()
 
 console = Console()
 
+
+# ─────────────────────────────────────────────
+# Modèle Pydantic — structure de la réponse attendue
+#
+# Avant : on demandait au LLM de renvoyer du JSON, on parsait à la main.
+# Maintenant : on déclare un modèle Python, LangChain transmet le schéma
+# au LLM et valide la réponse automatiquement. Si le LLM renvoie
+# un score hors de [0,100], Pydantic lève une erreur immédiatement.
+# ─────────────────────────────────────────────
+
+class ScoringResult(BaseModel):
+    score: int = Field(ge=0, le=100, description="Score de correspondance entre 0 et 100")
+    explication: str = Field(description="Résumé en 2-3 phrases de la correspondance globale")
+    points_forts: list[str] = Field(default_factory=list, description="Points forts de la candidature")
+    points_faibles: list[str] = Field(default_factory=list, description="Points faibles ou manques")
+
+
 # ─────────────────────────────────────────────
 # Prompt système
+# Note : on retire le bloc JSON explicite — LangChain injecte
+# automatiquement le schéma Pydantic dans les instructions au LLM.
 # ─────────────────────────────────────────────
 
 SYSTEM_PROMPT_SCORING = """Tu es un expert en recrutement et en matching CV/offre d'emploi.
 Tu analyses la correspondance entre un profil candidat et une offre d'emploi.
-
-Tu réponds UNIQUEMENT avec du JSON valide dans ce format exact :
-{
-  "score": <entier entre 0 et 100>,
-  "explication": "<résumé en 2-3 phrases de la correspondance globale>",
-  "points_forts": ["<point 1>", "<point 2>", "<point 3>"],
-  "points_faibles": ["<point 1>", "<point 2>"]
-}
 
 Barème de scoring :
 - 90-100 : Correspondance parfaite, candidature prioritaire
@@ -68,7 +80,7 @@ Critères d'évaluation (par ordre d'importance) :
 # ─────────────────────────────────────────────
 
 def formater_profil(profil: dict) -> str:
-    """Formate le profil candidat en texte structuré pour Gemini."""
+    """Formate le profil candidat en texte structuré."""
     candidat = profil.get("candidat", {})
     competences = profil.get("competences", {})
     criteres = profil.get("criteres", {})
@@ -86,7 +98,7 @@ def formater_profil(profil: dict) -> str:
         f"Types de contrat acceptés : {', '.join(criteres.get('types_contrat', []))}",
         f"Salaire minimum : {criteres.get('salaire_min_annuel', 'Non précisé')} €/an brut",
         f"Télétravail souhaité : {'Oui' if criteres.get('teletravail_souhaite') else 'Non'}",
-        f"Localisation : Paris / Île-de-France (rayon {criteres.get('distance_km', 30)} km)",
+        f"Localisation acceptée : {', '.join(criteres.get('localisations_acceptees', ['Paris / Île-de-France']))}",
         f"Secteurs préférés : {', '.join(criteres.get('secteurs_preferes', []))}",
         "",
         "## PRÉFÉRENCES ENTREPRISE",
@@ -98,7 +110,7 @@ def formater_profil(profil: dict) -> str:
 
 
 def formater_offre(offre: dict) -> str:
-    """Formate une offre d'emploi en texte structuré pour Gemini."""
+    """Formate une offre d'emploi en texte structuré."""
     lignes = [
         "## OFFRE D'EMPLOI",
         f"Titre : {offre['intitule'] or 'Non précisé'}",
@@ -115,43 +127,45 @@ def formater_offre(offre: dict) -> str:
 
 
 # ─────────────────────────────────────────────
-# Appel Gemini API
+# Appel LangChain avec structured output
+#
+# Avant (google-genai brut) :
+#   reponse = client.models.generate_content(...)
+#   donnees = json.loads(reponse.text)   ← peut planter
+#   score = int(donnees.get("score", -1)) ← pas de validation
+#
+# Maintenant (LangChain + Pydantic) :
+#   structured_llm = llm.with_structured_output(ScoringResult)
+#   result = structured_llm.invoke([...])
+#   result.score  ← garanti int entre 0 et 100
 # ─────────────────────────────────────────────
 
 def scorer_offre(
     offre: dict,
     profil_texte: str,
-    client: genai.Client,
+    llm: ChatGoogleGenerativeAI,
 ) -> tuple[int, str, list, list]:
     """
-    Envoie une offre + profil à Gemini et retourne (score, explication, points_forts, points_faibles).
-    Le JSON est garanti par response_mime_type — pas besoin de parser du texte brut.
-    En cas d'erreur, retourne score=-1.
+    Score une offre via LangChain structured output.
+    Retourne (score, explication, points_forts, points_faibles).
     """
     offre_texte = formater_offre(dict(offre))
     prompt = f"{profil_texte}\n\n---\n\n{offre_texte}"
 
+    # with_structured_output() indique à LangChain d'injecter le schéma
+    # Pydantic dans les instructions et de valider la réponse automatiquement.
+    # method="json_mode" correspond à response_mime_type="application/json"
+    # de l'ancienne version — plus fiable avec les modèles preview.
+    structured_llm = llm.with_structured_output(ScoringResult, method="json_mode")
+
     try:
-        reponse = client.models.generate_content(
-            model="gemini-3.1-flash-lite-preview",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT_SCORING,
-                response_mime_type="application/json",
-                max_output_tokens=1024,
-                temperature=0.2,
-            ),
-        )
-        donnees = json.loads(reponse.text)
+        result: ScoringResult = structured_llm.invoke([
+            SystemMessage(content=SYSTEM_PROMPT_SCORING),
+            HumanMessage(content=prompt),
+        ])
+        return result.score, result.explication, result.points_forts, result.points_faibles
 
-        score = int(donnees.get("score", -1))
-        explication = donnees.get("explication", "")
-        points_forts = donnees.get("points_forts", [])
-        points_faibles = donnees.get("points_faibles", [])
-
-        return score, explication, points_forts, points_faibles
-
-    except (json.JSONDecodeError, ValueError, KeyError, Exception) as e:
+    except Exception as e:
         console.print(f"  [red]Erreur pour l'offre {dict(offre)['id']} :[/red] {e}")
         return -1, f"Erreur : {str(e)}", [], []
 
@@ -196,33 +210,19 @@ def mettre_a_jour_score(
 # ─────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Score les offres d'emploi avec Gemini")
-    parser.add_argument(
-        "--limite",
-        type=int,
-        default=20,
-        help="Nombre maximum d'offres à scorer (défaut : 20)",
-    )
-    parser.add_argument(
-        "--rescorer",
-        action="store_true",
-        help="Rescorer aussi les offres avec score=-1 (erreurs précédentes)",
-    )
+    parser = argparse.ArgumentParser(description="Score les offres d'emploi avec Gemini via LangChain")
+    parser.add_argument("--limite", type=int, default=20, help="Nombre max d'offres à scorer (défaut : 20)")
+    parser.add_argument("--rescorer", action="store_true", help="Rescorer les offres avec score=-1")
     args = parser.parse_args()
 
-    console.print("\n[bold cyan]Agent de Recherche d'Emploi — Scoring (Gemini)[/bold cyan]")
+    console.print("\n[bold cyan]Agent de Recherche d'Emploi — Scoring (LangChain)[/bold cyan]")
     console.print("━" * 50)
 
-    # Vérifier et configurer la clé API Google
     api_key = os.getenv("GOOGLE_AI_STUDIO_KEY")
     if not api_key:
         console.print("[red]Erreur :[/red] GOOGLE_AI_STUDIO_KEY manquante dans .env")
-        console.print("[dim]Obtenir une clé : https://aistudio.google.com/app/apikey[/dim]")
         raise SystemExit(1)
 
-    client = genai.Client(api_key=api_key)
-
-    # Charger le profil
     profil_path = os.getenv("PROFILE_PATH", "config/profile.yaml")
     with open(profil_path, encoding="utf-8") as f:
         profil = yaml.safe_load(f)
@@ -230,7 +230,6 @@ def main():
     db_path = os.getenv("DB_PATH", "data/offers.db")
     init_db(db_path)
 
-    # Récupérer les offres à scorer
     condition = "score IS NULL"
     if args.rescorer:
         condition = "(score IS NULL OR score = -1)"
@@ -246,7 +245,15 @@ def main():
         console.print("[dim]Lancez d'abord : python src/collector.py[/dim]")
         return
 
-    console.print(f"[cyan]{len(offres)} offres à scorer[/cyan] (modèle : gemini-3.1-flash-lite-preview)\n")
+    console.print(f"[cyan]{len(offres)} offres à scorer[/cyan] (LangChain → gemini-3.1-flash-lite-preview)\n")
+
+    # Instanciation du LLM LangChain — remplace genai.Client()
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-3.1-flash-lite-preview",
+        google_api_key=api_key,
+        temperature=0.2,
+        max_output_tokens=1024,
+    )
 
     profil_texte = formater_profil(profil)
     scores_ok = 0
@@ -268,7 +275,7 @@ def main():
             progress.update(tache, description=f"Scoring : [italic]{intitule_court}[/italic]")
 
             score, explication, points_forts, points_faibles = scorer_offre(
-                offre, profil_texte, client
+                offre, profil_texte, llm
             )
 
             mettre_a_jour_score(
@@ -281,10 +288,8 @@ def main():
                 scores_erreur += 1
 
             progress.advance(tache)
-            # Pause pour respecter les rate limits (15 req/min sur tier gratuit)
             time.sleep(4)
 
-    # Résumé
     console.print()
     console.print(f"[green]✓[/green] {scores_ok} offres scorées avec succès")
     if scores_erreur:

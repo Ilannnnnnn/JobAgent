@@ -12,6 +12,10 @@ Ce script :
 4. Génère un fichier HTML adapté — ouvrir dans le navigateur et imprimer en A4
 
 Le HTML de base contient déjà le CSS @media print pour un rendu A4 parfait.
+
+Changement vs version précédente :
+    - google-genai SDK brut → LangChain (ChatGoogleGenerativeAI)
+    - generate_content_stream() → llm.stream() — même comportement, API unifiée
 """
 
 import argparse
@@ -20,8 +24,8 @@ import re
 import sys
 
 from bs4 import BeautifulSoup
-from google import genai
-from google.genai import types
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import SystemMessage, HumanMessage
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
@@ -122,26 +126,20 @@ Retourne le HTML complet adapté."""
 # Appel Gemini avec streaming
 # ─────────────────────────────────────────────
 
-def adapter_cv_avec_gemini(cv_html: str, offre: dict, client: genai.Client) -> str:
+def adapter_cv_avec_gemini(cv_html: str, offre: dict, llm: ChatGoogleGenerativeAI) -> str:
     """
-    Appelle Gemini en streaming pour générer le CV HTML adapté.
+    Appelle Gemini en streaming via LangChain pour générer le CV HTML adapté.
     Retourne le HTML complet prêt à être sauvegardé.
     """
     prompt = construire_prompt(cv_html, offre)
     cv_adapte = ""
-
-    for chunk in client.models.generate_content_stream(
-        model="gemini-3.1-flash-lite-preview",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT_CV,
-            max_output_tokens=8192,
-            temperature=0.2,
-        ),
-    ):
-        if chunk.text:
-            cv_adapte += chunk.text
-
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT_CV),
+        HumanMessage(content=prompt),
+    ]
+    for chunk in llm.stream(messages):
+        if chunk.content:
+            cv_adapte += chunk.content
     return cv_adapte.strip()
 
 
@@ -185,7 +183,12 @@ def main():
         console.print("[red]Erreur :[/red] GOOGLE_AI_STUDIO_KEY manquante dans .env")
         raise SystemExit(1)
 
-    client = genai.Client(api_key=api_key)
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-3.1-flash-lite-preview",
+        google_api_key=api_key,
+        temperature=0.2,
+        max_output_tokens=8192,
+    )
 
     db_path = os.getenv("DB_PATH", "data/offers.db")
     cv_path = os.getenv("CV_PATH", "cv/cv_base.html")
@@ -236,7 +239,7 @@ def main():
 
         # Étape 2 : Adaptation avec Gemini (streaming)
         progress.update(tache, description="Adaptation avec Gemini...")
-        cv_adapte = adapter_cv_avec_gemini(cv_html, offre_dict, client)
+        cv_adapte = adapter_cv_avec_gemini(cv_html, offre_dict, llm)
         cv_adapte = nettoyer_html(cv_adapte)
         progress.update(tache, description="[green]CV adapté généré[/green]")
 
