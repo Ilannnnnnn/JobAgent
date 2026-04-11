@@ -23,6 +23,10 @@ from datetime import datetime
 from typing import TypedDict, Optional
 from urllib.parse import quote
 
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
+
 import yaml
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -62,6 +66,7 @@ class AgentState(TypedDict):
     new_offers_count: int
     scored_count: int
     report_path: Optional[str]
+    excel_path: Optional[str]
 
 
 # ─────────────────────────────────────────────
@@ -445,6 +450,113 @@ def generer_rapport(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────
+# Noeud 4 : Génération du fichier Excel
+# ─────────────────────────────────────────────
+
+def generer_excel(state: AgentState) -> AgentState:
+    """Exporte toutes les offres scorées dans data/offres.xlsx (fichier permanent, écrasé à chaque run)."""
+    console.print("\n[bold cyan]▶ Étape 4 / 4 — Génération du fichier Excel[/bold cyan]")
+
+    db_path = os.getenv("DB_PATH", "data/offers.db")
+
+    with get_connection(db_path) as conn:
+        offres = conn.execute(
+            "SELECT * FROM offres WHERE score IS NOT NULL AND score >= 0 ORDER BY score DESC"
+        ).fetchall()
+
+    offres = [dict(o) for o in offres]
+
+    if not offres:
+        console.print("[yellow]Aucune offre scorée pour le fichier Excel.[/yellow]")
+        return {**state, "excel_path": None}
+
+    chemin = "data/offres.xlsx"
+
+    # Couleurs de remplissage
+    VERT  = PatternFill("solid", fgColor="C6EFCE")   # score >= 85
+    JAUNE = PatternFill("solid", fgColor="FFEB9C")   # score >= 60
+    GRIS  = PatternFill("solid", fgColor="F2F2F2")   # sinon
+
+    colonnes = [
+        "Score", "Priorité", "Poste", "Entreprise", "Lieu",
+        "Contrat", "Salaire", "Source", "Analyse", "Points forts",
+        "Points faibles", "URL",
+    ]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Offres"
+
+    # Ligne d'en-tête
+    ws.append(colonnes)
+    header_font = Font(bold=True)
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Largeurs de colonnes
+    largeurs = [8, 20, 35, 25, 20, 15, 20, 12, 60, 40, 40, 50]
+    for i, larg in enumerate(largeurs, 1):
+        ws.column_dimensions[get_column_letter(i)].width = larg
+
+    # Remplissage des lignes de données
+    for offre in offres:
+        score = offre.get("score") or 0
+
+        if score >= 85:
+            priorite = "★★★ PRIORITAIRE"
+            fill = VERT
+        elif score >= 60:
+            priorite = "★★☆ À CONSIDÉRER"
+            fill = JAUNE
+        else:
+            priorite = "★☆☆ FAIBLE"
+            fill = GRIS
+
+        # Déduire la source depuis l'URL
+        url = offre.get("url") or ""
+        if "adzuna" in url:
+            source = "Adzuna"
+        elif "apec" in url:
+            source = "APEC"
+        elif "indeed" in url:
+            source = "Indeed"
+        else:
+            source = "—"
+
+        ligne = [
+            score,
+            priorite,
+            offre.get("intitule") or "",
+            offre.get("entreprise_nom") or "",
+            offre.get("lieu_travail") or "",
+            offre.get("type_contrat") or "",
+            offre.get("salaire_libelle") or "",
+            source,
+            offre.get("score_explication") or "",
+            offre.get("score_points_forts") or "",
+            offre.get("score_points_faibles") or "",
+            url,
+        ]
+        ws.append(ligne)
+
+        row_idx = ws.max_row
+        for cell in ws[row_idx]:
+            cell.fill = fill
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    # Filtres automatiques sur toutes les colonnes
+    ws.auto_filter.ref = ws.dimensions
+
+    # Gel de la première ligne
+    ws.freeze_panes = "A2"
+
+    wb.save(chemin)
+    console.print(f"[green]✓[/green] Fichier Excel généré : [bold]{os.path.abspath(chemin)}[/bold]")
+    return {**state, "excel_path": chemin}
+
+
+# ─────────────────────────────────────────────
 # Construction du graphe LangGraph
 # ─────────────────────────────────────────────
 
@@ -461,6 +573,7 @@ def construire_graphe():
     builder.add_node("collecter", collecter)
     builder.add_node("scorer_batch", scorer_batch)
     builder.add_node("generer_rapport", generer_rapport)
+    builder.add_node("generer_excel", generer_excel)
 
     builder.add_edge(START, "collecter")
     builder.add_conditional_edges(
@@ -472,7 +585,8 @@ def construire_graphe():
         },
     )
     builder.add_edge("scorer_batch", "generer_rapport")
-    builder.add_edge("generer_rapport", END)
+    builder.add_edge("generer_rapport", "generer_excel")
+    builder.add_edge("generer_excel", END)
 
     return builder.compile()
 
@@ -526,6 +640,7 @@ def main():
         "new_offers_count": 0,
         "scored_count": 0,
         "report_path": None,
+        "excel_path": None,
     }
 
     etat_final = app.invoke(etat_initial)
@@ -534,7 +649,8 @@ def main():
     console.print(Panel(
         f"Nouvelles offres collectées : [cyan]{etat_final['new_offers_count']}[/cyan]\n"
         f"Offres scorées : [green]{etat_final['scored_count']}[/green]\n"
-        f"Rapport : [bold]{etat_final['report_path'] or 'Non généré'}[/bold]",
+        f"Rapport texte  : [bold]{etat_final['report_path'] or 'Non généré'}[/bold]\n"
+        f"📊 Excel        : [bold]{os.path.abspath(etat_final['excel_path']) if etat_final.get('excel_path') else 'Non généré'}[/bold]",
         title="[bold]Résumé du pipeline[/bold]",
         border_style="green",
     ))
