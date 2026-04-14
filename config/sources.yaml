@@ -61,6 +61,22 @@ adzuna:
 
 
 # ============================================================
+# Configuration APEC (via Apify)
+# ============================================================
+
+apec:
+  # Localisation passée dans chaque searchUrl APEC
+  # "France" = pas de filtre géographique, sinon ex: "Paris", "Lyon"
+  location: "France"
+  # Un run Apify par terme → contourne la limite 20 offres/page
+  search_terms:
+    - "ingenieur IA"
+    - "AI engineer"
+    - "machine learning"
+    - "LLM engineer"
+
+
+# ============================================================
 # Configuration Indeed (via JobSpy)
 # ============================================================
 
@@ -69,3 +85,5 @@ indeed:
   results_wanted: 50
   # Âge maximum des offres en heures
   hours_old: 72
+  # Localisation passée à jobspy
+  location: "France"

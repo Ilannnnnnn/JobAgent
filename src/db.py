@@ -71,6 +71,14 @@ def init_db(db_path: str = DB_PATH_DEFAUT) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_url ON offres(url)"
         )
 
+        # Ajout de la colonne statut (ignoré si elle existe déjà)
+        try:
+            conn.execute(
+                "ALTER TABLE offres ADD COLUMN statut TEXT DEFAULT 'À postuler'"
+            )
+        except sqlite3.OperationalError:
+            pass  # Colonne déjà présente
+
         conn.commit()
 
 

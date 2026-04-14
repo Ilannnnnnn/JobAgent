@@ -47,6 +47,10 @@ from collector import (
 from scorer import scorer_offre, mettre_a_jour_score, formater_profil
 from dashboard import exporter_txt
 
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s — %(message)s")
+
+
 load_dotenv()
 
 console = Console()
@@ -132,9 +136,10 @@ def _scraper_adzuna(app_id: str, app_key: str, profil: dict, sources: dict, db_p
     return total
 
 
-def _scraper_apec(search_term: str, location: str, apify_token: str) -> list[dict]:
+def _scraper_apec(apec_cfg: dict, apify_token: str) -> list[dict]:
     """
-    Lance l'actor Apify APEC et retourne les offres au format unifié.
+    Lance l'actor Apify APEC avec une liste de searchUrls (un par search_term)
+    pour contourner la limite de 20 offres par page d'APEC.
     Retourne [] en cas d'erreur (token manquant, timeout, etc.).
     """
     import requests as _req
@@ -143,21 +148,39 @@ def _scraper_apec(search_term: str, location: str, apify_token: str) -> list[dic
         logging.warning("APIFY_API_TOKEN manquant — source APEC ignorée")
         return []
 
+    location = apec_cfg.get("location", "France")
+    search_terms = apec_cfg.get("search_terms", [])
+
+    # Fallback : si search_terms absent du YAML, liste vide → rien à scraper
+    if not search_terms:
+        logging.warning("apec.search_terms vide dans sources.yaml — source APEC ignorée")
+        return []
+
+    # Construit une URL par terme avec les 4 types de contrat (CDI/CDD/etc.)
+    _contrats = (
+        "typesConvention=143684&typesConvention=143685"
+        "&typesConvention=143686&typesConvention=143687"
+    )
+    def _build_url(term: str) -> str:
+        url = (
+            "https://www.apec.fr/candidat/recherche-emploi.html/emploi"
+            f"?motsCles={quote(term)}&{_contrats}"
+        )
+        if location and location.lower() != "france":
+            url += f"&lieu={quote(location)}"
+        return url
+
+    search_urls = [_build_url(t) for t in search_terms]
+
     actor_id = os.getenv("APIFY_ACTOR_APEC", "easyapi~apec-jobs-scraper")
     base = "https://api.apify.com/v2"
     headers = {"Content-Type": "application/json"}
 
-    # Lancer le run
+    # Lancer le run avec la liste complète de searchUrls
     run_resp = _req.post(
         f"{base}/acts/{actor_id}/runs",
         params={"token": apify_token},
-        json={
-            "searchUrl": (
-                "https://www.apec.fr/candidat/recherche-emploi.html/emploi"
-                f"?motsCles={quote(search_term)}"
-            ),
-            "maxResults": 50,
-        },
+        json={"searchUrls": search_urls, "maxItems": 30},
         headers=headers,
         timeout=30,
     )
@@ -193,18 +216,28 @@ def _scraper_apec(search_term: str, location: str, apify_token: str) -> list[dic
 
     offres = []
     for item in items:
-        url = item.get("url") or item.get("applyUrl", "")
-        if not url:
+        apec_id = item.get("id")
+        if not apec_id:
             continue
+        url = f"https://www.apec.fr/candidat/recherche-emploi.html/emploi/{apec_id}"
         offres.append({
-            "titre": item.get("title") or item.get("titre", ""),
-            "entreprise": item.get("company") or item.get("entreprise", ""),
-            "localisation": item.get("location") or item.get("localisation", ""),
-            "description": item.get("description", ""),
+            "titre": item.get("intitule", ""),
+            "entreprise": item.get("entreprise", {}).get("nom", "") if isinstance(item.get("entreprise"), dict) else item.get("entreprise", ""),
+            "localisation": item.get("lieuTexte", ""),
+            "description": item.get("texteOffre", ""),
             "url": url,
             "source": "apec",
-            "date_publication": item.get("date") or item.get("datePublication", ""),
+            "date_publication": item.get("datePublication", ""),
+            "salaire": item.get("salaireTexte", ""),
+            "type_contrat": item.get("typeContrat", ""),
         })
+    # Juste avant return offres
+    logging.info("APEC — %d items bruts reçus du dataset", len(items))
+    if items:
+        logging.info("APEC — structure du 1er item : %s", list(items[0].keys()))
+        logging.info("APEC — 1er item complet : %s", items[0])
+    logging.info("APEC — %d offres après normalisation", len(offres))
+    
     return offres
 
 
@@ -264,8 +297,8 @@ def _unifier_vers_db(offre: dict) -> dict:
         "description": offre["description"],
         "entreprise_nom": offre["entreprise"],
         "lieu_travail": offre["localisation"],
-        "type_contrat": "",
-        "salaire_libelle": "",
+        "type_contrat": offre.get("type_contrat", ""),
+        "salaire_libelle": offre.get("salaire", ""),
         "date_creation": offre["date_publication"],
         "url": url,
         "raw_json": json.dumps(offre, ensure_ascii=False),
@@ -289,10 +322,15 @@ def collecter(state: AgentState) -> AgentState:
     search_term = profil["candidat"]["poste_cible"]
     deal_breakers = profil.get("deal_breakers", [])
 
-    # Paramètres Indeed depuis sources.yaml (section indeed)
+    # Paramètres APEC depuis sources.yaml
+    apec_cfg = sources.get("apec", {})
+    apec_location = apec_cfg.get("location", "France")
+
+    # Paramètres Indeed depuis sources.yaml
     indeed_cfg = sources.get("indeed", {})
     indeed_results_wanted = indeed_cfg.get("results_wanted", 50)
     indeed_hours_old = indeed_cfg.get("hours_old", 72)
+    indeed_location = indeed_cfg.get("location", "France")
 
     init_db(db_path)
 
@@ -300,9 +338,9 @@ def collecter(state: AgentState) -> AgentState:
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             executor.submit(_scraper_adzuna, app_id, app_key, profil, sources, db_path): "adzuna",
-            executor.submit(_scraper_apec, search_term, "France", apify_token): "apec",
+            executor.submit(_scraper_apec, apec_cfg, apify_token): "apec",
             executor.submit(
-                _scraper_indeed, search_term, "France",
+                _scraper_indeed, search_term, indeed_location,
                 indeed_results_wanted, indeed_hours_old,
             ): "indeed",
         }

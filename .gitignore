@@ -42,4 +42,5 @@ Thumbs.db
 cv/cv_base.html
 cv/cv_adapte_*.html
 data/offres_*.txt
+data/*.xlsx
 config/profile.yaml

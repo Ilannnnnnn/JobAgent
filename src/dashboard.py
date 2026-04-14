@@ -1,99 +1,33 @@
 """
-Dashboard CLI — Affichage des offres scorées.
+Dashboard Streamlit — Consultation et suivi des offres d'emploi.
 
 Utilisation :
-    python src/dashboard.py                   # Top 10 offres + export auto
-    python src/dashboard.py --top 20          # Top 20 offres
-    python src/dashboard.py --detail <ID>     # Détail d'une offre
-    python src/dashboard.py --toutes          # Toutes les offres
-    python src/dashboard.py --no-export       # Affichage sans générer le fichier texte
+    streamlit run src/dashboard.py
+
+Conserve la fonction exporter_txt() utilisée par pipeline.py.
 """
 
-import argparse
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime
 
+import pandas as pd
+import streamlit as st
 from dotenv import load_dotenv
-from rich import box
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
 
-# Ajouter le dossier src/ au path pour importer db.py
+# Ajouter src/ au path pour importer db.py
 sys.path.insert(0, os.path.dirname(__file__))
 from db import init_db, get_connection
 
 load_dotenv()
 
-console = Console()
+DB_PATH = os.getenv("DB_PATH", "data/offers.db")
 
 
 # ─────────────────────────────────────────────
-# Couleur selon le score
-# ─────────────────────────────────────────────
-
-def couleur_score(score: int) -> str:
-    if score >= 80:
-        return "bold green"
-    elif score >= 60:
-        return "yellow"
-    elif score >= 40:
-        return "orange3"
-    else:
-        return "red"
-
-
-# ─────────────────────────────────────────────
-# Affichage terminal (tableau compact)
-# ─────────────────────────────────────────────
-
-def afficher_tableau(offres: list, titre: str = "Top Offres d'Emploi") -> None:
-    """Affiche les offres dans un tableau rich — une ligne par offre."""
-    if not offres:
-        console.print("\n[yellow]Aucune offre scorée trouvée.[/yellow]")
-        console.print("[dim]Lancez d'abord : python src/collector.py && python src/scorer.py[/dim]\n")
-        return
-
-    table = Table(
-        title=titre,
-        box=box.SIMPLE_HEAVY,
-        show_header=True,
-        header_style="bold cyan",
-        border_style="dim",
-        show_lines=True,
-        expand=True,
-    )
-
-    table.add_column("#", style="dim", width=3, justify="right", no_wrap=True)
-    table.add_column("Score", width=6, justify="center", no_wrap=True)
-    table.add_column("Titre du poste", style="bold", min_width=25, ratio=3)
-    table.add_column("Entreprise", min_width=15, ratio=2)
-    table.add_column("Lieu", min_width=12, ratio=2)
-    table.add_column("Contrat", min_width=8, ratio=1)
-    table.add_column("Salaire", min_width=15, ratio=2)
-
-    for rang, offre in enumerate(offres, 1):
-        score = offre["score"]
-        couleur = couleur_score(score)
-
-        table.add_row(
-            str(rang),
-            f"[{couleur}]{score}[/{couleur}]",
-            offre["intitule"] or "",
-            offre["entreprise_nom"] or "N/A",
-            offre["lieu_travail"] or "",
-            offre["type_contrat"] or "?",
-            offre["salaire_libelle"] or "Non précisé",
-        )
-
-    console.print()
-    console.print(table)
-
-
-# ─────────────────────────────────────────────
-# Export fichier texte
+# Fonction conservée pour pipeline.py
 # ─────────────────────────────────────────────
 
 def exporter_txt(offres: list, chemin: str) -> None:
@@ -113,7 +47,6 @@ def exporter_txt(offres: list, chemin: str) -> None:
     for rang, offre in enumerate(offres, 1):
         score = offre["score"]
 
-        # Indicateur visuel du score
         if score >= 80:
             indicateur = "★★★  PRIORITAIRE"
         elif score >= 60:
@@ -135,7 +68,6 @@ def exporter_txt(offres: list, chemin: str) -> None:
             "",
         ]
 
-        # Analyse Gemini
         if offre.get("score_explication"):
             lignes += [
                 "  ANALYSE :",
@@ -143,7 +75,6 @@ def exporter_txt(offres: list, chemin: str) -> None:
                 "",
             ]
 
-        # Points forts
         try:
             points_forts = json.loads(offre.get("score_points_forts") or "[]")
             if points_forts:
@@ -154,7 +85,6 @@ def exporter_txt(offres: list, chemin: str) -> None:
         except (json.JSONDecodeError, TypeError):
             pass
 
-        # Points faibles
         try:
             points_faibles = json.loads(offre.get("score_points_faibles") or "[]")
             if points_faibles:
@@ -178,153 +108,311 @@ def exporter_txt(offres: list, chemin: str) -> None:
 
 
 # ─────────────────────────────────────────────
-# Affichage détail d'une offre
+# Helpers Streamlit
 # ─────────────────────────────────────────────
 
-def afficher_detail(offre_id: str, db_path: str) -> None:
-    """Affiche le détail complet d'une offre."""
+def deriver_source(url: str) -> str:
+    url = (url or "").lower()
+    if "adzuna" in url:
+        return "Adzuna"
+    if "apec" in url:
+        return "APEC"
+    if "indeed" in url:
+        return "Indeed"
+    return "N/A"
+
+
+def mettre_a_jour_statut(offre_id: str, statut: str, db_path: str) -> None:
     with get_connection(db_path) as conn:
-        offre = conn.execute(
-            "SELECT * FROM offres WHERE id = ?", (offre_id,)
-        ).fetchone()
-
-    if not offre:
-        console.print(f"\n[red]Offre introuvable :[/red] {offre_id}\n")
-        return
-
-    offre = dict(offre)
-
-    console.print()
-    console.print(Panel(
-        f"[bold]{offre['intitule'] or 'Titre non précisé'}[/bold]\n"
-        f"[cyan]{offre['entreprise_nom'] or 'N/A'}[/cyan]  •  "
-        f"{offre['lieu_travail'] or ''}  •  "
-        f"{offre['type_contrat'] or ''}  •  "
-        f"{offre['salaire_libelle'] or 'Salaire non précisé'}\n"
-        f"[link]{offre['url'] or ''}[/link]",
-        title=f"[bold]Offre {offre['id']}[/bold]",
-        border_style="cyan",
-    ))
-
-    if offre["score"] is not None and offre["score"] >= 0:
-        score = offre["score"]
-        couleur = couleur_score(score)
-
-        points_forts = []
-        points_faibles = []
-        try:
-            points_forts = json.loads(offre.get("score_points_forts") or "[]")
-            points_faibles = json.loads(offre.get("score_points_faibles") or "[]")
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-        forts = "\n".join(f"  [green]✓[/green] {p}" for p in points_forts) or "  [dim]N/A[/dim]"
-        faibles = "\n".join(f"  [red]✗[/red] {p}" for p in points_faibles) or "  [dim]N/A[/dim]"
-
-        console.print(Panel(
-            f"[{couleur}]Score : {score}/100[/{couleur}]\n\n"
-            f"[bold]Analyse :[/bold]\n{offre['score_explication'] or 'N/A'}\n\n"
-            f"[bold]Points forts :[/bold]\n{forts}\n\n"
-            f"[bold]Points faibles :[/bold]\n{faibles}",
-            title="Évaluation Gemini",
-            border_style=couleur.replace("bold ", ""),
-        ))
-
-    description = (offre["description"] or "Aucune description")[:1500]
-    console.print(Panel(description, title="Description", border_style="dim"))
-    console.print()
+        conn.execute(
+            "UPDATE offres SET statut = ? WHERE id = ?",
+            (statut, offre_id),
+        )
+        conn.commit()
 
 
-# ─────────────────────────────────────────────
-# Statistiques globales
-# ─────────────────────────────────────────────
+def deriver_priorite(score: int) -> str:
+    if score >= 85:
+        return "★★★ PRIORITAIRE"
+    if score >= 60:
+        return "★★ À CONSIDÉRER"
+    return "★ FAIBLE"
 
-def afficher_stats(db_path: str) -> None:
+
+def charger_offres(db_path: str) -> pd.DataFrame:
+    """Charge toutes les offres scorées depuis la DB."""
     with get_connection(db_path) as conn:
-        stats = conn.execute("""
-            SELECT
-                COUNT(*) as total,
-                COUNT(CASE WHEN score IS NOT NULL AND score >= 0 THEN 1 END) as scorees,
-                COUNT(CASE WHEN score IS NULL THEN 1 END) as non_scorees,
-                ROUND(AVG(CASE WHEN score >= 0 THEN score END), 1) as score_moyen,
-                MAX(CASE WHEN score >= 0 THEN score END) as score_max
-            FROM offres
-        """).fetchone()
+        rows = conn.execute(
+            "SELECT * FROM offres WHERE score IS NOT NULL AND score >= 0 ORDER BY score DESC"
+        ).fetchall()
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame([dict(r) for r in rows])
 
-    if not stats or stats["total"] == 0:
-        console.print("[dim]Base de données vide[/dim]")
-        return
 
-    stats = dict(stats)
-    panneau = (
-        f"Total : [bold]{stats['total']}[/bold] offres  "
-        f"| Scorées : [green]{stats['scorees']}[/green]  "
-        f"| En attente : [yellow]{stats['non_scorees']}[/yellow]  "
-        f"| Score moyen : [cyan]{stats['score_moyen'] or 'N/A'}[/cyan]  "
-        f"| Meilleur : [bold green]{stats['score_max'] or 'N/A'}[/bold green]"
-    )
-    console.print(Panel(panneau, title="Statistiques", border_style="dim"))
+def colorier_texte(row):
+    score = row["Score"]
+    if score >= 85:
+        color = "color: #1a6b3a"
+    elif score >= 60:
+        color = "color: #7a4f00"
+    else:
+        color = "color: #666666"
+    return [color] * len(row)
 
 
 # ─────────────────────────────────────────────
-# Point d'entrée principal
+# App principale
 # ─────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Dashboard des offres d'emploi scorées")
-    parser.add_argument("--top", type=int, default=10, help="Nombre d'offres (défaut : 10)")
-    parser.add_argument("--detail", metavar="ID", help="Détail d'une offre par son ID")
-    parser.add_argument("--toutes", action="store_true", help="Inclure les offres non scorées")
-    parser.add_argument("--no-export", action="store_true", help="Ne pas générer le fichier texte")
-    args = parser.parse_args()
+    st.set_page_config(
+        page_title="JobAgent — Dashboard",
+        page_icon="💼",
+        layout="wide",
+    )
+    st.title("💼 JobAgent — Offres d'emploi")
 
-    db_path = os.getenv("DB_PATH", "data/offers.db")
-    init_db(db_path)
+    init_db(DB_PATH)
 
-    console.print("\n[bold cyan]Agent de Recherche d'Emploi — Dashboard[/bold cyan]")
-    console.print("━" * 50)
+    # ── Sidebar ──────────────────────────────
+    st.sidebar.header("Filtres")
 
-    if args.detail:
-        afficher_detail(args.detail, db_path)
+    score_min = st.sidebar.slider("Score minimum", 0, 100, 60)
+
+    sources_dispo = ["Adzuna", "Indeed", "APEC"]
+    sources = st.sidebar.multiselect("Source", sources_dispo, default=sources_dispo)
+
+    contrats_dispo = ["CDI", "CDD", "Freelance", "N/A"]
+    contrats = st.sidebar.multiselect("Contrat", contrats_dispo, default=contrats_dispo)
+
+    statuts_dispo = ["À postuler", "Postulé", "Refusé", "Entretien"]
+    statuts = st.sidebar.multiselect("Statut", statuts_dispo, default=statuts_dispo)
+
+    st.sidebar.divider()
+
+    if st.sidebar.button("Lancer le pipeline", type="primary"):
+        with st.sidebar.expander("Logs pipeline", expanded=True):
+            log_placeholder = st.empty()
+            proc = subprocess.Popen(
+                ["python", "src/pipeline.py"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            lines = []
+            for line in proc.stdout:
+                lines.append(line.rstrip())
+                log_placeholder.code("\n".join(lines[-50:]))
+            proc.wait()
+            if proc.returncode == 0:
+                st.sidebar.success("Pipeline terminé avec succès.")
+            else:
+                st.sidebar.error(f"Pipeline terminé avec le code {proc.returncode}.")
+            st.rerun()
+
+    # ── Chargement et filtrage des données ───
+    df_complet = charger_offres(DB_PATH)
+
+    if df_complet.empty:
+        st.info("Aucune offre scorée en base. Lancez le pipeline pour collecter des offres.")
         return
 
-    afficher_stats(db_path)
+    # Colonnes dérivées
+    df_complet["Source"] = df_complet["url"].apply(deriver_source)
+    df_complet["Priorité"] = df_complet["score"].apply(deriver_priorite)
+    df_complet["statut"] = df_complet["statut"].fillna("À postuler")
 
-    with get_connection(db_path) as conn:
-        if args.toutes:
-            offres = conn.execute(
-                "SELECT * FROM offres ORDER BY COALESCE(score, -999) DESC LIMIT ?",
-                (args.top,),
-            ).fetchall()
-            titre = f"Top {args.top} Offres (toutes)"
-        else:
-            offres = conn.execute(
-                "SELECT * FROM offres WHERE score IS NOT NULL AND score >= 0 ORDER BY score DESC LIMIT ?",
-                (args.top,),
-            ).fetchall()
-            titre = f"Top {min(args.top, len(offres))} Offres Scorées"
+    # Normalisation contrat pour le filtre
+    def normaliser_contrat(val):
+        val = (val or "").strip()
+        if not val:
+            return "N/A"
+        return val
 
-    offres = [dict(o) for o in offres]
-    afficher_tableau(offres, titre=titre)
+    df_complet["_contrat_norm"] = df_complet["type_contrat"].apply(normaliser_contrat)
 
-    if not offres:
+    # Application des filtres
+    mask = (
+        (df_complet["score"] >= score_min)
+        & (df_complet["Source"].isin(sources))
+        & (df_complet["statut"].isin(statuts))
+    )
+
+    # Filtre contrat : "N/A" couvre les valeurs vides
+    if "N/A" in contrats:
+        contrats_autres = [c for c in contrats if c != "N/A"]
+        mask_contrat = (
+            df_complet["_contrat_norm"].isin(contrats_autres)
+            | (df_complet["_contrat_norm"] == "N/A")
+        )
+    else:
+        mask_contrat = df_complet["_contrat_norm"].isin(contrats)
+    mask = mask & mask_contrat
+
+    df_filtre = df_complet[mask].reset_index(drop=True)
+
+    # ── Métriques ────────────────────────────
+    total = len(df_complet)
+    prioritaires = int((df_complet["score"] >= 85).sum())
+    postulees = int((df_complet["statut"] == "Postulé").sum())
+    score_moyen = df_complet["score"].mean()
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total offres scorées", total)
+    m2.metric("Prioritaires (≥ 85)", prioritaires)
+    m3.metric("Postulées", postulees)
+    m4.metric("Score moyen", f"{score_moyen:.1f}" if not pd.isna(score_moyen) else "—")
+
+    st.divider()
+
+    # ── Tableau principal ─────────────────────
+    st.subheader(f"Offres ({len(df_filtre)} résultats)")
+
+    if df_filtre.empty:
+        st.warning("Aucune offre ne correspond aux filtres sélectionnés.")
         return
 
-    # Export fichier texte : toutes les offres scorées (pas seulement le top N affiché)
-    if not args.no_export:
-        with get_connection(db_path) as conn:
-            toutes_scorees = conn.execute(
-                "SELECT * FROM offres WHERE score IS NOT NULL AND score >= 0 ORDER BY score DESC"
-            ).fetchall()
-        toutes_scorees = [dict(o) for o in toutes_scorees]
+    cols_affichage = ["score", "Priorité", "intitule", "entreprise_nom",
+                      "lieu_travail", "type_contrat", "salaire_libelle",
+                      "Source", "statut", "url"]
+    rename_map = {
+        "score": "Score",
+        "intitule": "Poste",
+        "entreprise_nom": "Entreprise",
+        "lieu_travail": "Lieu",
+        "type_contrat": "Contrat",
+        "salaire_libelle": "Salaire",
+        "statut": "Statut",
+        "url": "URL",
+    }
 
-        horodatage = datetime.now().strftime("%Y%m%d_%H%M")
-        chemin_export = f"data/offres_{horodatage}.txt"
-        exporter_txt(toutes_scorees, chemin_export)
-        console.print(f"[green]✓[/green] Rapport exporté ({len(toutes_scorees)} offres) : [bold]{chemin_export}[/bold]")
+    df_affichage = df_filtre[cols_affichage].rename(columns=rename_map)
 
-    console.print("[dim]Voir le détail : python src/dashboard.py --detail <ID>[/dim]")
-    console.print()
+    st.markdown("""
+<style>
+[data-testid="stDataFrame"] td { color: var(--text-color) !important; }
+</style>
+""", unsafe_allow_html=True)
+
+    styled = (
+        df_affichage.style
+        .apply(colorier_texte, axis=1)
+        .map(lambda _: "font-weight: bold", subset=["Score"])
+    )
+
+    selection = st.dataframe(
+        styled,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={
+            "URL": st.column_config.LinkColumn("URL", display_text="Lien"),
+        },
+    )
+
+    # ── Panneau détail ────────────────────────
+    if selection.selection.rows:
+        idx = selection.selection.rows[0]
+        offre = df_filtre.iloc[idx]
+
+        st.divider()
+        st.subheader(f"Détail — {offre.get('intitule', '')}")
+
+        col_gauche, col_droite = st.columns([3, 1])
+
+        with col_gauche:
+            st.markdown(f"**Entreprise :** {offre.get('entreprise_nom') or '—'}  \n"
+                        f"**Lieu :** {offre.get('lieu_travail') or '—'}  \n"
+                        f"**Contrat :** {offre.get('type_contrat') or '—'}  \n"
+                        f"**Salaire :** {offre.get('salaire_libelle') or '—'}  \n"
+                        f"**Score :** {offre.get('score')}/100")
+
+            with st.expander("Analyse complète", expanded=True):
+                st.write(offre.get("score_explication") or "—")
+
+            col_pf, col_pfai = st.columns(2)
+            with col_pf:
+                st.markdown("**Points forts**")
+                try:
+                    points_forts = json.loads(offre.get("score_points_forts") or "[]")
+                    for p in points_forts:
+                        st.markdown(f"✅ {p}")
+                    if not points_forts:
+                        st.write("—")
+                except (json.JSONDecodeError, TypeError):
+                    st.write("—")
+
+            with col_pfai:
+                st.markdown("**Points faibles**")
+                try:
+                    points_faibles = json.loads(offre.get("score_points_faibles") or "[]")
+                    for p in points_faibles:
+                        st.markdown(f"❌ {p}")
+                    if not points_faibles:
+                        st.write("—")
+                except (json.JSONDecodeError, TypeError):
+                    st.write("—")
+
+        with col_droite:
+            st.markdown("**Actions**")
+
+            # Changement de statut
+            statuts_liste = ["À postuler", "Postulé", "Refusé", "Entretien"]
+            statut_actuel = offre.get("statut") or "À postuler"
+            if statut_actuel not in statuts_liste:
+                statut_actuel = "À postuler"
+
+            nouveau_statut = st.selectbox(
+                "Statut candidature",
+                statuts_liste,
+                index=statuts_liste.index(statut_actuel),
+                key=f"statut_{offre['id']}",
+            )
+            if nouveau_statut != statut_actuel:
+                mettre_a_jour_statut(offre["id"], nouveau_statut, DB_PATH)
+                st.rerun()
+
+            # Ouvrir l'offre
+            url_offre = offre.get("url") or ""
+            if url_offre:
+                st.link_button("Ouvrir l'offre", url_offre, use_container_width=True)
+
+            # Adapter le CV
+            if st.button("Postuler (adapter CV)", key=f"cv_{offre['id']}", use_container_width=True):
+                with st.spinner("Adaptation du CV en cours..."):
+                    result = subprocess.run(
+                        ["python", "src/cv_adapter.py", "--offre-id", offre["id"]],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                if result.returncode == 0:
+                    offre_id_court = offre["id"].replace("adzuna_", "")[:12]
+                    cv_path = os.path.join("cv", f"cv_adapte_{offre_id_court}.html")
+                    st.success(f"CV adapté généré : {cv_path}")
+                else:
+                    st.error(result.stderr or "Erreur lors de l'adaptation du CV.")
+
+            st.divider()
+
+            # Suppression de l'offre
+            confirm_key = f"confirm_del_{offre['id']}"
+            if st.button("Supprimer cette offre", type="secondary", key=f"del_{offre['id']}", use_container_width=True):
+                st.session_state[confirm_key] = True
+
+            if st.session_state.get(confirm_key):
+                st.warning("Confirmer la suppression ?")
+                if st.button("Confirmer", key=f"confirm_{offre['id']}", use_container_width=True):
+                    with get_connection(DB_PATH) as conn:
+                        conn.execute("DELETE FROM offres WHERE id = ?", (offre["id"],))
+                        conn.commit()
+                    st.session_state.pop(confirm_key, None)
+                    st.rerun()
 
 
 if __name__ == "__main__":
