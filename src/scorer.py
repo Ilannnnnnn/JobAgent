@@ -149,7 +149,25 @@ def scorer_offre(
     Score une offre via LangChain structured output.
     Retourne (score, explication, points_forts, points_faibles).
     """
-    offre_texte = formater_offre(dict(offre))
+    offre_dict = dict(offre)
+    description = offre_dict.get("description", "") or ""
+    source = (offre_dict.get("source") or "").lower()
+    est_linkedin_sans_details = "linkedin" in source and len(description) < 200
+
+    if est_linkedin_sans_details:
+        offre_texte = "\n".join([
+            "## OFFRE D'EMPLOI (LinkedIn — description non disponible)",
+            f"Titre : {offre_dict.get('intitule') or 'Non précisé'}",
+            f"Entreprise : {offre_dict.get('entreprise_nom') or 'Non précisée'}",
+            f"Lieu : {offre_dict.get('lieu_travail') or 'Non précisé'}",
+            f"Type de contrat : {offre_dict.get('type_contrat') or 'Non précisé'}",
+            f"Salaire : {offre_dict.get('salaire_libelle') or 'Non précisé'}",
+            "",
+            "Note : la description complète n'est pas disponible. Score basé sur le titre et les métadonnées uniquement.",
+        ])
+    else:
+        offre_texte = formater_offre(offre_dict)
+
     prompt = f"{profil_texte}\n\n---\n\n{offre_texte}"
 
     # with_structured_output() indique à LangChain d'injecter le schéma
