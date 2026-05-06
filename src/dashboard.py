@@ -398,21 +398,75 @@ def main():
                 else:
                     st.error(result.stderr or "Erreur lors de l'adaptation du CV.")
 
-            st.divider()
+        st.write("DEBUG: section enrichissement visible")
 
-            # Suppression de l'offre
-            confirm_key = f"confirm_del_{offre['id']}"
-            if st.button("Supprimer cette offre", type="secondary", key=f"del_{offre['id']}", use_container_width=True):
-                st.session_state[confirm_key] = True
-
-            if st.session_state.get(confirm_key):
-                st.warning("Confirmer la suppression ?")
-                if st.button("Confirmer", key=f"confirm_{offre['id']}", use_container_width=True):
+        # ── Enrichissement offre ──────────────────
+        with st.expander("📋 Enrichir l'offre avec la description complète"):
+            st.caption("Colle ici la description complète de l'offre pour améliorer le scoring et l'adaptation du CV.")
+            description_complete = st.text_area(
+                "Description complète",
+                value=offre.get("description", "") or "",
+                height=300,
+                key=f"desc_enrichie_{offre['id']}",
+            )
+            if st.button("💾 Sauvegarder et rescorer", key=f"btn_enrichir_{offre['id']}"):
+                if description_complete.strip():
                     with get_connection(DB_PATH) as conn:
-                        conn.execute("DELETE FROM offres WHERE id = ?", (offre["id"],))
+                        conn.execute(
+                            "UPDATE offres SET description = ? WHERE id = ?",
+                            (description_complete.strip(), offre["id"]),
+                        )
                         conn.commit()
-                    st.session_state.pop(confirm_key, None)
-                    st.rerun()
+
+                    from scorer import scorer_offre, mettre_a_jour_score, formater_profil
+                    import yaml
+                    from langchain_google_genai import ChatGoogleGenerativeAI
+
+                    api_key = os.getenv("GOOGLE_AI_STUDIO_KEY")
+                    profil_path = os.getenv("PROFILE_PATH", "config/profile.yaml")
+                    with open(profil_path, encoding="utf-8") as f:
+                        profil = yaml.safe_load(f)
+                    profil_texte = formater_profil(profil)
+
+                    with get_connection(DB_PATH) as conn:
+                        offre_row = conn.execute(
+                            "SELECT * FROM offres WHERE id = ?", (offre["id"],)
+                        ).fetchone()
+
+                    if offre_row and api_key:
+                        llm = ChatGoogleGenerativeAI(
+                            model="gemini-3.1-flash-lite-preview",
+                            google_api_key=api_key,
+                            temperature=0.2,
+                            max_output_tokens=1024,
+                        )
+                        score, explication, points_forts, points_faibles = scorer_offre(
+                            offre_row, profil_texte, llm
+                        )
+                        mettre_a_jour_score(
+                            offre["id"], score, explication, points_forts, points_faibles, DB_PATH
+                        )
+                        st.success(f"✓ Offre enrichie et rescorée : {score}/100")
+                        st.rerun()
+                    elif not api_key:
+                        st.error("GOOGLE_AI_STUDIO_KEY manquante dans .env")
+                else:
+                    st.warning("La description est vide.")
+
+        # ── Zone dangereuse ───────────────────────
+        st.divider()
+        confirm_key = f"confirm_del_{offre['id']}"
+        if st.button("Supprimer cette offre", type="secondary", key=f"del_{offre['id']}"):
+            st.session_state[confirm_key] = True
+
+        if st.session_state.get(confirm_key):
+            st.warning("Confirmer la suppression ?")
+            if st.button("Confirmer", key=f"confirm_{offre['id']}"):
+                with get_connection(DB_PATH) as conn:
+                    conn.execute("DELETE FROM offres WHERE id = ?", (offre["id"],))
+                    conn.commit()
+                st.session_state.pop(confirm_key, None)
+                st.rerun()
 
 
 if __name__ == "__main__":
