@@ -186,9 +186,6 @@ def main():
     contrats_dispo = ["CDI", "CDD", "Freelance", "N/A"]
     contrats = st.sidebar.multiselect("Contrat", contrats_dispo, default=contrats_dispo)
 
-    statuts_dispo = ["À postuler", "Postulé", "Refusé", "Entretien"]
-    statuts = st.sidebar.multiselect("Statut", statuts_dispo, default=statuts_dispo)
-
     st.sidebar.divider()
 
     if st.sidebar.button("Lancer le pipeline", type="primary"):
@@ -238,7 +235,6 @@ def main():
     mask = (
         (df_complet["score"] >= score_min)
         & (df_complet["Source"].isin(sources))
-        & (df_complet["statut"].isin(statuts))
     )
 
     # Filtre contrat : "N/A" couvre les valeurs vides
@@ -268,12 +264,15 @@ def main():
 
     st.divider()
 
-    # ── Tableau principal ─────────────────────
-    st.subheader(f"Offres ({len(df_filtre)} résultats)")
-
+    # ── DataFrames par statut ─────────────────
     if df_filtre.empty:
         st.warning("Aucune offre ne correspond aux filtres sélectionnés.")
         return
+
+    df_a_postuler = df_filtre[df_filtre["statut"].isin(["À postuler"])].reset_index(drop=True)
+    df_postule = df_filtre[df_filtre["statut"] == "Postulé"].reset_index(drop=True)
+    df_entretien = df_filtre[df_filtre["statut"] == "Entretien"].reset_index(drop=True)
+    df_refuse = df_filtre[df_filtre["statut"] == "Refusé"].reset_index(drop=True)
 
     cols_affichage = ["score", "Priorité", "intitule", "entreprise_nom",
                       "lieu_travail", "type_contrat", "salaire_libelle",
@@ -289,35 +288,66 @@ def main():
         "url": "URL",
     }
 
-    df_affichage = df_filtre[cols_affichage].rename(columns=rename_map)
-
     st.markdown("""
 <style>
 [data-testid="stDataFrame"] td { color: var(--text-color) !important; }
 </style>
 """, unsafe_allow_html=True)
 
-    styled = (
-        df_affichage.style
-        .apply(colorier_texte, axis=1)
-        .map(lambda _: "font-weight: bold", subset=["Score"])
-    )
+    def build_styled(df_tab):
+        df_aff = df_tab[cols_affichage].rename(columns=rename_map)
+        return (
+            df_aff.style
+            .apply(colorier_texte, axis=1)
+            .map(lambda _: "font-weight: bold", subset=["Score"])
+        )
 
-    selection = st.dataframe(
-        styled,
+    col_config = {"URL": st.column_config.LinkColumn("URL", display_text="Lien")}
+    dataframe_kwargs = dict(
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
-        column_config={
-            "URL": st.column_config.LinkColumn("URL", display_text="Lien"),
-        },
+        column_config=col_config,
     )
 
+    # ── Onglets ───────────────────────────────
+    onglet_a_postuler, onglet_postule, onglet_entretien, onglet_refuse = st.tabs([
+        f"📋 À postuler ({len(df_a_postuler)})",
+        f"✅ Postulé ({len(df_postule)})",
+        f"🎯 Entretien ({len(df_entretien)})",
+        f"❌ Refusé ({len(df_refuse)})",
+    ])
+
+    with onglet_a_postuler:
+        selection_a_postuler = st.dataframe(build_styled(df_a_postuler), key="table_a_postuler", **dataframe_kwargs)
+
+    with onglet_postule:
+        selection_postule = st.dataframe(build_styled(df_postule), key="table_postule", **dataframe_kwargs)
+
+    with onglet_entretien:
+        selection_entretien = st.dataframe(build_styled(df_entretien), key="table_entretien", **dataframe_kwargs)
+
+    with onglet_refuse:
+        selection_refuse = st.dataframe(build_styled(df_refuse), key="table_refuse", **dataframe_kwargs)
+
     # ── Panneau détail ────────────────────────
-    if selection.selection.rows:
-        idx = selection.selection.rows[0]
-        offre = df_filtre.iloc[idx]
+    offre_selectionnee = None
+    if selection_a_postuler.selection.rows:
+        idx = selection_a_postuler.selection.rows[0]
+        offre_selectionnee = df_a_postuler.iloc[idx]
+    elif selection_postule.selection.rows:
+        idx = selection_postule.selection.rows[0]
+        offre_selectionnee = df_postule.iloc[idx]
+    elif selection_entretien.selection.rows:
+        idx = selection_entretien.selection.rows[0]
+        offre_selectionnee = df_entretien.iloc[idx]
+    elif selection_refuse.selection.rows:
+        idx = selection_refuse.selection.rows[0]
+        offre_selectionnee = df_refuse.iloc[idx]
+
+    if offre_selectionnee is not None:
+        offre = offre_selectionnee
 
         st.divider()
         st.subheader(f"Détail — {offre.get('intitule', '')}")
