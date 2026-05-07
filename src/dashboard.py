@@ -566,10 +566,10 @@ def main():
     )
 
     # ── DataFrames par statut (avant st.tabs pour les compteurs) ─────────
-    df_a_postuler = df_filtre[df_filtre["Statut"].isin(["À postuler", "", None]) | df_filtre["Statut"].isna()].reset_index(drop=True)
-    df_postule = df_filtre[df_filtre["Statut"] == "Postulé"].reset_index(drop=True)
-    df_entretien = df_filtre[df_filtre["Statut"] == "Entretien"].reset_index(drop=True)
-    df_refuse = df_filtre[df_filtre["Statut"] == "Refusé"].reset_index(drop=True)
+    df_a_postuler = df_filtre[df_filtre["statut"].isin(["À postuler", "", None]) | df_filtre["statut"].isna()].reset_index(drop=True)
+    df_postule = df_filtre[df_filtre["statut"] == "Postulé"].reset_index(drop=True)
+    df_entretien = df_filtre[df_filtre["statut"] == "Entretien"].reset_index(drop=True)
+    df_refuse = df_filtre[df_filtre["statut"] == "Refusé"].reset_index(drop=True)
 
     # ── Onglets ───────────────────────────────
     onglet_a_postuler, onglet_postule, onglet_entretien, onglet_refuse = st.tabs([
