@@ -1,0 +1,92 @@
+candidat:
+  nom: "Ilan Jaffeux-Cheniout"
+  poste_cible: "Ingénieur IA"
+
+competences:
+  techniques:
+    - Python
+    - PyTorch
+    - HuggingFace
+    - LangGraph
+    - LoRA / Fine-tuning LLMs
+    - Scikit-learn
+    - TensorFlow
+    - Docker
+    - Git
+    - PostgreSQL
+    - Django
+    - AWS
+    - Azure
+  soft_skills:
+    - Autonomie
+    - Curiosité technique
+    - Rigueur scientifique
+    - Travail en équipe
+    - Résolution de problèmes
+
+experience:
+  annees_totales: 2
+  domaines:
+    - LLMs et agents autonomes
+    - Fine-tuning et transfer learning
+    - NLP et traitement de la parole
+    - Computer Vision
+    - Développement backend
+    - Recherche appliquée
+
+formation:
+  niveau: "Bac+5"
+  domaines:
+    - Intelligence artificielle
+    - Machine learning
+    - Signal processing
+
+criteres:
+  localisation: "75056"
+  distance_km: 30
+  localisations_acceptees:
+    - "Paris / Île-de-France"
+    - "Bruxelles (Belgique)"
+    - "Genève (Suisse)"
+    - "Amsterdam (Pays-Bas)"
+    - "Madrid (Espagne)"
+    - "Barcelone (Espagne)"
+    - "Remote / Télétravail complet"
+  types_contrat:
+    - CDI
+  salaire_min_annuel: 45000
+  teletravail_souhaite: true
+  teletravail_minimum_jours_par_semaine: 2
+  secteurs_preferes:
+    - "Intelligence artificielle"
+    - "Édition de logiciels"
+    - "Startups tech"
+    - "Conseil en technologie"
+    - "Santé numérique"
+    - "Télécommunications"
+
+preferences_entreprise:
+  taille_preferee: "Toutes tailles"
+  culture:
+    - "Innovation / R&D"
+    - "Agilité / Scrum"
+    - "Formation continue"
+    - "Open source"
+  stack_preferee:
+    - "Python"
+    - "LLMs / Transformers"
+    - "Cloud (AWS / Azure / GCP)"
+
+deal_breakers:
+  - "commercial"
+  - "démarchage"
+  - "téléprospection"
+  - "call center"
+  - "Alternance"
+  - "Apprentissage"
+  - "VRP"
+  - "porte-à-porte"
+  - "management de transition"
+  - "non cadre"
+  - "bac+2"
+  - "bac+3"

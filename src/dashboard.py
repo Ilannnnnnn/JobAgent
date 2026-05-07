@@ -127,6 +127,7 @@ def deriver_source(url: str) -> str:
     if "indeed" in url:             return "Indeed"
     if "welcometothejungle" in url: return "Wttj"
     if "google" in url:             return "Google"
+    if "linkedin.com/comm" in url or "linkedin.com/jobs" in url: return "Linkedin"
     return "N/A"
 
 
@@ -157,7 +158,7 @@ def charger_offres(db_path: str) -> pd.DataFrame:
     """Charge toutes les offres scorées depuis la DB."""
     with get_connection(db_path) as conn:
         rows = conn.execute(
-            "SELECT * FROM offres WHERE score IS NOT NULL AND score >= 0 ORDER BY score DESC"
+            "SELECT * FROM offres WHERE score >= 0 OR score IS NULL ORDER BY COALESCE(score, 0) DESC"
         ).fetchall()
     if not rows:
         return pd.DataFrame()
@@ -610,6 +611,7 @@ def main():
         return
 
     # Colonnes dérivées
+    df_complet["score"] = df_complet["score"].fillna(0).astype(int)
     df_complet["Source"] = df_complet["source"].str.capitalize().fillna("Inconnu")
     df_complet["Priorité"] = df_complet["score"].apply(deriver_priorite)
     df_complet["statut"] = df_complet["statut"].fillna("À postuler")

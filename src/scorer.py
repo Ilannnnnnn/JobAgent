@@ -9,6 +9,7 @@ Utilisation :
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -24,7 +25,7 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
 sys.path.insert(0, os.path.dirname(__file__))
 from db import init_db, get_connection
 
-load_dotenv()
+load_dotenv(override=True)
 
 console = Console()
 
@@ -172,19 +173,16 @@ def scorer_offre(
 
     prompt = f"{profil_texte}\n\n---\n\n{offre_texte}"
 
-    # with_structured_output() indique à LangChain d'injecter le schéma
-    # Pydantic dans les instructions et de valider la réponse automatiquement.
-    # method="json_mode" correspond à response_mime_type="application/json"
-    # de l'ancienne version — plus fiable avec les modèles preview.
-    structured_llm = llm.with_structured_output(ScoringResult, method="json_mode")
-
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}]
+            system=SYSTEM_PROMPT_SCORING,
+            messages=[{"role": "user", "content": f"{prompt}\n\n{SCHEMA_JSON_SCORING}"}]
         )
-        texte = response.content[0].text
+        texte_brut = response.content[0].text if response.content else ""
+        logging.info("=== HAIKU REPONSE BRUTE === %s", repr(texte_brut[:500]))
+        texte = texte_brut
 
         # Extraire l'objet JSON (robuste aux préfixes éventuels)
         debut = texte.find("{")
@@ -197,8 +195,8 @@ def scorer_offre(
         return result.score, result.explication, result.points_forts, result.points_faibles
 
     except Exception as e:
-        console.print(f"  [red]Erreur pour l'offre {dict(offre)['id']} :[/red] {e}")
-        return -1, f"Erreur : {str(e)}", [], []
+        logging.warning("Erreur scoring %s : %s", offre_dict.get("id", "?"), e)
+        return 0, f"Scoring échoué : {e}", [], []
 
 
 # ─────────────────────────────────────────────
