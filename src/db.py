@@ -3,6 +3,7 @@ Module de gestion de la base de données SQLite.
 Partagé par tous les scripts — centralise le schéma et les connexions.
 """
 
+import logging
 import os
 import sqlite3
 
@@ -78,6 +79,85 @@ def init_db(db_path: str = DB_PATH_DEFAUT) -> None:
             )
         except sqlite3.OperationalError:
             pass  # Colonne déjà présente
+
+        # Ajout de la colonne source (ignoré si elle existe déjà)
+        try:
+            conn.execute("ALTER TABLE offres ADD COLUMN source TEXT")
+        except sqlite3.OperationalError:
+            pass  # Colonne déjà présente
+
+        # Ajout de la colonne date_postulation (ignoré si elle existe déjà)
+        try:
+            conn.execute("ALTER TABLE offres ADD COLUMN date_postulation TEXT")
+        except sqlite3.OperationalError:
+            pass  # Colonne déjà présente
+
+        # Migration : déduit la source depuis l'id pour les lignes sans valeur
+        conn.execute("""
+            UPDATE offres SET source =
+            CASE
+                WHEN id LIKE 'apec%'    THEN 'apec'
+                WHEN id LIKE 'indeed%'  THEN 'indeed'
+                WHEN id LIKE 'adzuna%'  THEN 'adzuna'
+                WHEN id LIKE 'wttj%'    THEN 'wttj'
+                WHEN id LIKE 'google%'   THEN 'google'
+                WHEN id LIKE 'linkedin%' THEN 'linkedin'
+                WHEN id LIKE 'manuel%'  THEN 'manuel'
+                ELSE 'inconnu'
+            END
+            WHERE source IS NULL
+        """)
+
+        # Migration : remplace les codes numériques APEC par des libellés lisibles
+        conn.execute("""
+            UPDATE offres SET type_contrat = CASE type_contrat
+                WHEN '101887' THEN 'CDD'
+                WHEN '101888' THEN 'CDI'
+                WHEN '101889' THEN 'Interim'
+                WHEN '101906' THEN 'Alternance'
+                WHEN '597137' THEN 'CDI'
+                ELSE type_contrat
+            END
+            WHERE source = 'apec' AND type_contrat GLOB '[0-9]*'
+        """)
+
+        # Migration one-shot : supprime les offres APEC avec des URLs invalides
+        # (contenant typesConvention) pour forcer un re-scraping propre.
+        # Sans effet une fois les offres purgées.
+        conn.execute("""
+            DELETE FROM offres
+            WHERE source = 'apec' AND url LIKE '%typesConvention%'
+        """)
+
+        # Migration : insère le segment detail-offre/ manquant dans les URLs APEC
+        try:
+            conn.execute("""
+                UPDATE offres
+                SET url = REPLACE(url,
+                    '/emploi/' || SUBSTR(url, INSTR(url, '/emploi/') + 8, 20),
+                    '/emploi/detail-offre/' || SUBSTR(url, INSTR(url, '/emploi/') + 8, 20)
+                )
+                WHERE source = 'apec'
+                AND url NOT LIKE '%/detail-offre/%'
+            """)
+        except Exception as e:
+            logging.warning("Migration URL APEC : %s", e)
+
+        # Nettoie les intitulés LinkedIn qui contiennent une URL au lieu d'un titre
+        conn.execute("""
+            UPDATE offres
+            SET intitule = ''
+            WHERE source = 'linkedin'
+            AND (intitule LIKE 'http%' OR intitule LIKE 'www%')
+        """)
+
+        # Supprime les offres LinkedIn vides (titre absent et score nul)
+        conn.execute("""
+            DELETE FROM offres
+            WHERE source = 'linkedin'
+            AND (intitule = '' OR intitule IS NULL)
+            AND score = 0
+        """)
 
         conn.commit()
 

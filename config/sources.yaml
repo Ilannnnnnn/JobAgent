@@ -87,3 +87,32 @@ indeed:
   hours_old: 72
   # Localisation passée à jobspy
   location: "France"
+
+
+# ============================================================
+# Configuration Welcome to the Jungle (via Apify)
+# ============================================================
+
+wttj:
+  location: "France"
+  max_items: 30
+
+
+# ============================================================
+# Configuration Google Jobs (via JobSpy)
+# ============================================================
+
+google_jobs:
+  enabled: true
+
+
+# ============================================================
+# Configuration Gmail IMAP (alertes LinkedIn)
+# ============================================================
+
+gmail_imap:
+  enabled: true
+  expediteurs:
+    - "jobalerts-noreply@linkedin.com"
+  label: "INBOX"
+  max_emails: 20

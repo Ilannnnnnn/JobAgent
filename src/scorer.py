@@ -1,15 +1,10 @@
 """
-Scorer d'offres d'emploi via LangChain + Google Gemini.
+Scorer d'offres d'emploi via Anthropic Claude Haiku.
 
 Utilisation :
     python src/scorer.py              # Score les 20 prochaines offres non scorées
     python src/scorer.py --limite 50  # Score jusqu'à 50 offres
     python src/scorer.py --rescorer   # Rescorer les offres en erreur (score=-1)
-
-Changement vs version précédente :
-    - google-genai (SDK brut) → LangChain (ChatGoogleGenerativeAI)
-    - json.loads() manuel → Pydantic ScoringResult (validation automatique)
-    - Le modèle déclare ce qu'il attend, LangChain s'occupe du reste
 """
 
 import argparse
@@ -18,10 +13,9 @@ import os
 import sys
 import time
 
+import anthropic
 import yaml
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
@@ -33,6 +27,8 @@ from db import init_db, get_connection
 load_dotenv()
 
 console = Console()
+
+client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
 # ─────────────────────────────────────────────
@@ -86,11 +82,14 @@ def formater_profil(profil: dict) -> str:
     criteres = profil.get("criteres", {})
     prefs = profil.get("preferences_entreprise", {})
     experience = profil.get("experience", {})
+    formation = profil.get("formation", {})
 
     lignes = [
         "## PROFIL CANDIDAT",
         f"Poste cible : {candidat.get('poste_cible', 'Non précisé')}",
         f"Expérience : {experience.get('annees_totales', '?')} ans",
+        f"Formation : {formation.get('niveau', '')} en {', '.join(formation.get('domaines', []))}",
+        f"Domaines d'expérience : {', '.join(experience.get('domaines', []))}",
         f"Compétences techniques : {', '.join(competences.get('techniques', []))}",
         f"Soft skills : {', '.join(competences.get('soft_skills', []))}",
         "",
@@ -98,12 +97,14 @@ def formater_profil(profil: dict) -> str:
         f"Types de contrat acceptés : {', '.join(criteres.get('types_contrat', []))}",
         f"Salaire minimum : {criteres.get('salaire_min_annuel', 'Non précisé')} €/an brut",
         f"Télétravail souhaité : {'Oui' if criteres.get('teletravail_souhaite') else 'Non'}",
+        f"Télétravail minimum : {criteres.get('teletravail_minimum_jours_par_semaine', 0)} jours/semaine",
         f"Localisation acceptée : {', '.join(criteres.get('localisations_acceptees', ['Paris / Île-de-France']))}",
         f"Secteurs préférés : {', '.join(criteres.get('secteurs_preferes', []))}",
         "",
         "## PRÉFÉRENCES ENTREPRISE",
         f"Taille : {prefs.get('taille_preferee', 'Indifférent')}",
         f"Culture : {', '.join(prefs.get('culture', []))}",
+        f"Stack préférée : {', '.join(prefs.get('stack_preferee', []))}",
     ]
 
     return "\n".join(lignes)
@@ -127,26 +128,27 @@ def formater_offre(offre: dict) -> str:
 
 
 # ─────────────────────────────────────────────
-# Appel LangChain avec structured output
+# Appel Anthropic Claude Haiku
 #
-# Avant (google-genai brut) :
-#   reponse = client.models.generate_content(...)
-#   donnees = json.loads(reponse.text)   ← peut planter
-#   score = int(donnees.get("score", -1)) ← pas de validation
-#
-# Maintenant (LangChain + Pydantic) :
-#   structured_llm = llm.with_structured_output(ScoringResult)
-#   result = structured_llm.invoke([...])
-#   result.score  ← garanti int entre 0 et 100
+# Le prompt demande explicitement un JSON conforme au schéma ScoringResult.
+# On parse la réponse avec json.loads puis on valide via Pydantic.
 # ─────────────────────────────────────────────
+
+SCHEMA_JSON_SCORING = """Réponds UNIQUEMENT avec un objet JSON strict — aucun texte avant/après, pas de backticks — de la forme :
+{
+  "score": <entier entre 0 et 100>,
+  "explication": "<résumé en 2-3 phrases>",
+  "points_forts": ["<point fort 1>", "..."],
+  "points_faibles": ["<point faible 1>", "..."]
+}"""
+
 
 def scorer_offre(
     offre: dict,
     profil_texte: str,
-    llm: ChatGoogleGenerativeAI,
 ) -> tuple[int, str, list, list]:
     """
-    Score une offre via LangChain structured output.
+    Score une offre via Claude Haiku.
     Retourne (score, explication, points_forts, points_faibles).
     """
     offre_dict = dict(offre)
@@ -177,10 +179,21 @@ def scorer_offre(
     structured_llm = llm.with_structured_output(ScoringResult, method="json_mode")
 
     try:
-        result: ScoringResult = structured_llm.invoke([
-            SystemMessage(content=SYSTEM_PROMPT_SCORING),
-            HumanMessage(content=prompt),
-        ])
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        texte = response.content[0].text
+
+        # Extraire l'objet JSON (robuste aux préfixes éventuels)
+        debut = texte.find("{")
+        fin = texte.rfind("}")
+        if debut >= 0 and fin > debut:
+            texte = texte[debut:fin + 1]
+
+        donnees = json.loads(texte)
+        result = ScoringResult(**donnees)
         return result.score, result.explication, result.points_forts, result.points_faibles
 
     except Exception as e:
@@ -228,17 +241,17 @@ def mettre_a_jour_score(
 # ─────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Score les offres d'emploi avec Gemini via LangChain")
+    parser = argparse.ArgumentParser(description="Score les offres d'emploi avec Claude Haiku")
     parser.add_argument("--limite", type=int, default=20, help="Nombre max d'offres à scorer (défaut : 20)")
     parser.add_argument("--rescorer", action="store_true", help="Rescorer les offres avec score=-1")
     args = parser.parse_args()
 
-    console.print("\n[bold cyan]Agent de Recherche d'Emploi — Scoring (LangChain)[/bold cyan]")
+    console.print("\n[bold cyan]Agent de Recherche d'Emploi — Scoring (Claude Haiku)[/bold cyan]")
     console.print("━" * 50)
 
-    api_key = os.getenv("GOOGLE_AI_STUDIO_KEY")
+    api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        console.print("[red]Erreur :[/red] GOOGLE_AI_STUDIO_KEY manquante dans .env")
+        console.print("[red]Erreur :[/red] ANTHROPIC_API_KEY manquante dans .env")
         raise SystemExit(1)
 
     profil_path = os.getenv("PROFILE_PATH", "config/profile.yaml")
@@ -263,15 +276,7 @@ def main():
         console.print("[dim]Lancez d'abord : python src/collector.py[/dim]")
         return
 
-    console.print(f"[cyan]{len(offres)} offres à scorer[/cyan] (LangChain → gemini-3.1-flash-lite-preview)\n")
-
-    # Instanciation du LLM LangChain — remplace genai.Client()
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-3.1-flash-lite-preview",
-        google_api_key=api_key,
-        temperature=0.2,
-        max_output_tokens=1024,
-    )
+    console.print(f"[cyan]{len(offres)} offres à scorer[/cyan] (Claude Haiku 4.5)\n")
 
     profil_texte = formater_profil(profil)
     scores_ok = 0
@@ -293,7 +298,7 @@ def main():
             progress.update(tache, description=f"Scoring : [italic]{intitule_court}[/italic]")
 
             score, explication, points_forts, points_faibles = scorer_offre(
-                offre, profil_texte, llm
+                offre, profil_texte
             )
 
             mettre_a_jour_score(
@@ -306,7 +311,7 @@ def main():
                 scores_erreur += 1
 
             progress.advance(tache)
-            time.sleep(4)
+            #time.sleep(1)
 
     console.print()
     console.print(f"[green]✓[/green] {scores_ok} offres scorées avec succès")

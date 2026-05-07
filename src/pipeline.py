@@ -22,14 +22,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import TypedDict, Optional
 from urllib.parse import quote
+import email
+import imaplib
 
+import anthropic
+from bs4 import BeautifulSoup
+import httpx
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 
 import yaml
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, START, END
 from rich.console import Console
 from rich.panel import Panel
@@ -66,7 +70,6 @@ console = Console()
 # ─────────────────────────────────────────────
 
 class AgentState(TypedDict):
-    profile: dict
     new_offers_count: int
     scored_count: int
     report_path: Optional[str]
@@ -214,12 +217,27 @@ def _scraper_apec(apec_cfg: dict, apify_token: str) -> list[dict]:
     items_resp.raise_for_status()
     items = items_resp.json()
 
+    CONTRATS_APEC = {
+        101887: "CDD",
+        101888: "CDI",
+        101889: "Interim",
+        101890: "Freelance",
+        101906: "Alternance",
+        597137: "CDI",
+    }
+
     offres = []
     for item in items:
-        apec_id = item.get("id")
-        if not apec_id:
+        numero_offre = item.get("numeroOffre", "")
+        if not numero_offre:
             continue
-        url = f"https://www.apec.fr/candidat/recherche-emploi.html/emploi/{apec_id}"
+        url = (
+            f"https://www.apec.fr/candidat/recherche-emploi.html/emploi/detail-offre/{numero_offre}"
+            if numero_offre else ""
+        )
+        type_contrat = CONTRATS_APEC.get(
+            item.get("typeContrat") or item.get("type_contrat"), ""
+        )
         offres.append({
             "titre": item.get("intitule", ""),
             "entreprise": item.get("entreprise", {}).get("nom", "") if isinstance(item.get("entreprise"), dict) else item.get("entreprise", ""),
@@ -229,38 +247,145 @@ def _scraper_apec(apec_cfg: dict, apify_token: str) -> list[dict]:
             "source": "apec",
             "date_publication": item.get("datePublication", ""),
             "salaire": item.get("salaireTexte", ""),
-            "type_contrat": item.get("typeContrat", ""),
+            "type_contrat": type_contrat,
         })
-    # Juste avant return offres
-    logging.info("APEC — %d items bruts reçus du dataset", len(items))
-    if items:
-        logging.info("APEC — structure du 1er item : %s", list(items[0].keys()))
-        logging.info("APEC — 1er item complet : %s", items[0])
-    logging.info("APEC — %d offres après normalisation", len(offres))
-    
+    logging.debug("APEC — %d items reçus, %d normalisés", len(items), len(offres))
+
     return offres
 
 
-def _scraper_indeed(
+def _scraper_wttj(wttj_cfg: dict, apify_token: str, search_term: str) -> list[dict]:
+    """
+    Lance l'actor Apify WTTJ (clearpath~welcome-to-the-jungle-jobs-api).
+    Retourne [] en cas d'erreur (token manquant, timeout, etc.).
+    """
+    import requests as _req
+
+    if not apify_token:
+        logging.warning("APIFY_API_TOKEN manquant — source WTTJ ignorée")
+        return []
+
+    max_items = wttj_cfg.get("max_items", 30)
+    location = wttj_cfg.get("location", "France")
+    actor_id = os.getenv("APIFY_ACTOR_WTTJ", "clearpath~welcome-to-the-jungle-jobs-api")
+    base = "https://api.apify.com/v2"
+    headers = {"Content-Type": "application/json"}
+
+    run_resp = _req.post(
+        f"{base}/acts/{actor_id}/runs",
+        params={"token": apify_token},
+        json={
+            "query": search_term,
+            "websiteCountry": "fr",
+            "location": location,
+            "countryCode": "FR",
+            "maxItems": max_items,
+            "includeDetails": True,
+        },
+        headers=headers,
+        timeout=30,
+    )
+    run_resp.raise_for_status()
+    run_data = run_resp.json().get("data", {})
+    run_id = run_data.get("id")
+    dataset_id = run_data.get("defaultDatasetId")
+
+    for _ in range(36):
+        time.sleep(5)
+        status_resp = _req.get(
+            f"{base}/actor-runs/{run_id}",
+            params={"token": apify_token},
+            timeout=15,
+        )
+        status_resp.raise_for_status()
+        status = status_resp.json().get("data", {}).get("status", "")
+        if status == "SUCCEEDED":
+            break
+        if status in ("FAILED", "ABORTED", "TIMED-OUT"):
+            logging.error("Apify WTTJ run %s terminé avec statut : %s", run_id, status)
+            return []
+
+    items_resp = _req.get(
+        f"{base}/datasets/{dataset_id}/items",
+        params={"token": apify_token},
+        timeout=30,
+    )
+    items_resp.raise_for_status()
+    items = items_resp.json()
+
+    offres = []
+    for item in items:
+        url = item.get("url") or item.get("applyUrl") or ""
+        if not url:
+            continue
+        titre = item.get("name") or item.get("title") or ""
+        entreprise = item.get("organizationName") or ""
+        if not entreprise and isinstance(item.get("organization"), dict):
+            entreprise = item["organization"].get("name", "")
+
+        localisation = ""
+        loc = item.get("location")
+        if isinstance(loc, dict):
+            localisation = loc.get("city") or loc.get("name") or ""
+        elif isinstance(loc, str):
+            localisation = loc
+        if not localisation:
+            offices = item.get("offices")
+            if isinstance(offices, list) and offices:
+                first = offices[0]
+                if isinstance(first, dict):
+                    localisation = first.get("city") or first.get("name") or ""
+
+        sal_min = item.get("salaryMin")
+        sal_max = item.get("salaryMax")
+        sal_cur = item.get("salaryCurrency") or ""
+        if sal_min and sal_max:
+            salaire = f"{sal_min}-{sal_max} {sal_cur}".strip()
+        elif sal_min:
+            salaire = f"{sal_min} {sal_cur}".strip()
+        else:
+            salaire = ""
+
+        offres.append({
+            "titre": titre,
+            "entreprise": entreprise,
+            "localisation": localisation,
+            "description": item.get("description", ""),
+            "url": url,
+            "source": "wttj",
+            "date_publication": item.get("publishedAt", ""),
+            "salaire": salaire,
+        })
+
+    logging.info("WTTJ — %d offres récupérées", len(offres))
+    return offres
+
+
+def _scraper_jobspy(
     search_term: str,
     location: str,
     results_wanted: int = 50,
     hours_old: int = 72,
+    google_enabled: bool = True,
 ) -> list[dict]:
     """
-    Scrape Indeed via jobspy et retourne les offres au format unifié.
+    Scrape Indeed et Google Jobs via jobspy et retourne les offres au format unifié.
     results_wanted et hours_old sont lus depuis sources.yaml (section indeed).
+    google_enabled permet d'activer/désactiver Google Jobs (défaut : activé).
     Retourne [] en cas d'erreur (package absent, réseau, etc.).
     """
     try:
         from jobspy import scrape_jobs
     except ImportError:
-        logging.error("jobspy non installé — source Indeed ignorée (pip install python-jobspy)")
+        logging.error("jobspy non installé — sources Indeed/Google ignorées (pip install python-jobspy)")
         return []
 
+    site_name = ["indeed"] + (["google"] if google_enabled else [])
+
     df = scrape_jobs(
-        site_name=["indeed"],
+        site_name=site_name,
         search_term=search_term,
+        google_search_term=f"{search_term} jobs {location}",
         location=location,
         results_wanted=results_wanted,
         hours_old=hours_old,
@@ -281,7 +406,7 @@ def _scraper_indeed(
             "localisation": str(row.get("location", "")),
             "description": str(row.get("description") or row.get("job_description", "")),
             "url": url,
-            "source": "indeed",
+            "source": str(row.get("site") or "indeed"),
             "date_publication": str(row.get("date_posted", "")),
         })
     return offres
@@ -305,13 +430,252 @@ def _unifier_vers_db(offre: dict) -> dict:
     }
 
 
+def _collecter_emails_linkedin(gmail_address, app_password, expediteurs, label="INBOX", max_emails=20):
+    if not gmail_address or not app_password:
+        logging.warning("GMAIL_ADDRESS ou GMAIL_APP_PASSWORD manquant")
+        return []
+    offres_email: list[dict] = []
+    urls_vues: set[str] = set()
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(gmail_address, app_password)
+        mail.select(label)
+        for expediteur in expediteurs:
+            status, messages = mail.search(None, f'(UNSEEN FROM "{expediteur}")')
+            if status != "OK":
+                continue
+            ids = messages[0].split()[-max_emails:]
+            for email_id in ids:
+                status, data = mail.fetch(email_id, "(RFC822)")
+                if status != "OK":
+                    continue
+                msg = email.message_from_bytes(data[0][1])
+                corps_html = ""
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        if part.get_content_type() == "text/html":
+                            corps_html = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                            break
+                else:
+                    corps_html = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+                soup = BeautifulSoup(corps_html, "html.parser")
+                for job_card in soup.find_all("td", attrs={"data-test-id": "job-card"}):
+                    lien = None
+                    for a in job_card.find_all("a", href=True):
+                        if "jobs/view/" in a["href"]:
+                            lien = a
+                            break
+                    if not lien:
+                        continue
+                    url_propre = lien["href"].split("?")[0].rstrip("/")
+                    if url_propre in urls_vues:
+                        continue
+                    urls_vues.add(url_propre)
+                    titre_tag = job_card.find("a", class_=lambda c: c and "font-bold" in c)
+                    titre = titre_tag.get_text(strip=True) if titre_tag else ""
+                    entreprise = ""
+                    localisation = ""
+                    p_tags = job_card.find_all("p")
+                    if p_tags:
+                        entreprise_lieu = p_tags[0].get_text(strip=True)
+                        if "·" in entreprise_lieu:
+                            parties = entreprise_lieu.split("·", 1)
+                            entreprise = parties[0].strip()
+                            localisation = parties[1].strip()
+                        else:
+                            entreprise = entreprise_lieu.strip()
+                    if titre and not titre.startswith("http"):
+                        contenu = f"Titre du poste : {titre}\nEntreprise : {entreprise}\nLocalisation : {localisation}\nSource : LinkedIn\n"
+                        offres_email.append({"url": url_propre, "contenu_email": contenu})
+                        logging.info("LinkedIn extrait : %s | %s | %s", titre, entreprise, localisation)
+                mail.store(email_id, "+FLAGS", "\\Seen")
+        mail.logout()
+        logging.info("Emails LinkedIn : %d offres extraites avec contenu", len(offres_email))
+    except Exception as e:
+        logging.error("Erreur IMAP Gmail : %s", e)
+    return offres_email
+
+
+def _importer_offre_depuis_url(url: str, db_path: str, profil_texte: str, contenu_email: str = "") -> bool:
+    tavily_key = os.getenv("TAVILY_API_KEY", "")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not tavily_key or not anthropic_key:
+        logging.warning("TAVILY_API_KEY ou ANTHROPIC_API_KEY manquant")
+        return False
+    try:
+        contenu_fallback = contenu_email if contenu_email else url
+        tavily_ok = False
+        try:
+            resp = httpx.post(
+                "https://api.tavily.com/extract",
+                json={"urls": [url], "api_key": tavily_key},
+                timeout=30,
+            )
+            contenu = resp.json().get("results", [{}])[0].get("raw_content", "")
+            tavily_ok = bool(contenu)
+        except Exception as tavily_exc:
+            logging.warning("Tavily Extract échoué pour %s : %s", url, tavily_exc)
+            contenu = ""
+        contenu = contenu if contenu else contenu_fallback
+        if not contenu:
+            logging.warning("Aucun contenu disponible pour %s — offre ignorée", url)
+            return False
+        logging.debug("Contenu envoyé à Haiku pour %s : %s", url, contenu[:500])
+        if "linkedin" in url:
+            logging.info("Contenu LinkedIn envoyé à Haiku : %s", contenu[:200])
+        client = anthropic.Anthropic(api_key=anthropic_key)
+        if tavily_ok:
+            prompt = f"""Extrais les informations de cette offre d'emploi.
+Retourne UNIQUEMENT ce JSON, sans aucun texte avant ou après :
+{{"titre": "...", "entreprise": "...", "localisation": "...", "type_contrat": "", "salaire": "", "description": "..."}}
+
+Remplace les "..." par les valeurs trouvées. Si absent, mets "".
+
+Offre :
+{contenu[:3000]}
+"""
+        else:
+            prompt = f"""Extrais les informations de cette offre d'emploi LinkedIn.
+Le contenu est partiel (extrait d'un email d'alerte).
+Retourne UNIQUEMENT ce JSON :
+{{"titre": "...", "entreprise": "...", "localisation": "...", "type_contrat": "", "salaire": "", "description": "Offre LinkedIn - description complète sur le lien"}}
+
+Remplace les "..." par les valeurs trouvées. Pour type_contrat et salaire mets "" si absent.
+Ne retourne rien d'autre que le JSON.
+
+Contenu disponible :
+{contenu[:2000]}
+"""
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        texte = response.content[0].text.strip()
+        texte = texte.replace("```json", "").replace("```", "").strip()
+        if "{" in texte and "}" in texte:
+            texte = texte[texte.index("{"):texte.rindex("}")+1]
+            offre_dict = json.loads(texte)
+        else:
+            logging.warning("Haiku n'a pas retourné de JSON pour %s — construction minimale", url)
+            offre_dict = {
+                "titre": contenu[:100] if contenu else "",
+                "entreprise": "",
+                "localisation": "",
+                "type_contrat": "",
+                "salaire": "",
+                "description": contenu[:500] if contenu else "",
+            }
+        offre_dict["url"] = url
+        if not offre_dict.get("titre", "").strip():
+            logging.warning("Offre ignorée — titre vide pour %s", url)
+            return False
+        offre_db = {
+            "id": f"linkedin_{hashlib.md5(url.encode()).hexdigest()[:12]}",
+            "intitule": offre_dict.get("titre", ""),
+            "description": offre_dict.get("description", ""),
+            "entreprise_nom": offre_dict.get("entreprise", ""),
+            "lieu_travail": offre_dict.get("localisation", ""),
+            "type_contrat": offre_dict.get("type_contrat", ""),
+            "salaire_libelle": offre_dict.get("salaire", ""),
+            "date_creation": datetime.now().strftime("%Y-%m-%d"),
+            "url": url,
+            "raw_json": json.dumps(offre_dict, ensure_ascii=False),
+            "source": "linkedin",
+        }
+        with get_connection(db_path) as conn:
+            cursor = conn.execute("""
+                INSERT OR IGNORE INTO offres
+                (id, intitule, description, entreprise_nom, lieu_travail,
+                 type_contrat, salaire_libelle, date_creation, url, raw_json, source)
+                VALUES
+                (:id, :intitule, :description, :entreprise_nom, :lieu_travail,
+                 :type_contrat, :salaire_libelle, :date_creation, :url, :raw_json, :source)
+            """, offre_db)
+            conn.commit()
+            if cursor.rowcount == 0:
+                logging.info("Offre déjà en DB : %s", url)
+                return False
+        from scorer import scorer_offre, mettre_a_jour_score
+        with get_connection(db_path) as conn:
+            offre_row = conn.execute("SELECT * FROM offres WHERE id = ?", (offre_db["id"],)).fetchone()
+        if offre_row:
+            score, explication, points_forts, points_faibles = scorer_offre(offre_row, profil_texte)
+            mettre_a_jour_score(offre_db["id"], score, explication, points_forts, points_faibles, db_path)
+            logging.info("LinkedIn importé : %s — %d/100", offre_dict.get("titre", ""), score)
+        return True
+    except Exception as e:
+        logging.error("Erreur import URL %s : %s", url, e)
+        return False
+
+
+# ─────────────────────────────────────────────
+# Noeud 0 : Collecte emails LinkedIn (Gmail IMAP)
+# ─────────────────────────────────────────────
+
+def collecter_emails(state: AgentState) -> AgentState:
+    console.print("\n[bold cyan]▶ Collecte emails LinkedIn — Gmail IMAP[/bold cyan]")
+    gmail_address = os.getenv("GMAIL_ADDRESS", "")
+    app_password = os.getenv("GMAIL_APP_PASSWORD", "")
+    db_path = os.getenv("DB_PATH", "data/offers.db")
+    profil_path = os.getenv("PROFILE_PATH", "config/profile.yaml")
+    _, sources = charger_config()
+    gmail_cfg = sources.get("gmail_imap", {})
+    if not gmail_cfg.get("enabled", False):
+        console.print("[yellow]  Gmail IMAP désactivé[/yellow]")
+        return state
+    with open(profil_path, encoding="utf-8") as f:
+        profil = yaml.safe_load(f)
+    from scorer import formater_profil
+    profil_texte = formater_profil(profil)
+    expediteurs = gmail_cfg.get("expediteurs", ["jobs-noreply@linkedin.com"])
+    label = gmail_cfg.get("label", "INBOX")
+    max_emails = gmail_cfg.get("max_emails", 20)
+    offres_email = _collecter_emails_linkedin(gmail_address, app_password, expediteurs, label, max_emails)
+    if not offres_email:
+        console.print("  [dim]Aucune nouvelle alerte LinkedIn[/dim]")
+        return state
+    console.print(f"  [cyan]{len(offres_email)} offres LinkedIn trouvées[/cyan]")
+    importees = 0
+    for offre_email in offres_email:
+        if _importer_offre_depuis_url(offre_email["url"], db_path, profil_texte, contenu_email=offre_email["contenu_email"]):
+            importees += 1
+        time.sleep(2)
+    console.print(f"[green]✓[/green] {importees} offres LinkedIn importées")
+
+    # Rescorer les offres LinkedIn avec score 0 ou NULL (importées sans contenu suffisant)
+    from scorer import scorer_offre, mettre_a_jour_score
+    with get_connection(db_path) as conn:
+        offres_a_rescorer = conn.execute("""
+            SELECT * FROM offres
+            WHERE source = 'linkedin'
+            AND (score = 0 OR score IS NULL)
+            ORDER BY collected_at DESC
+        """).fetchall()
+
+    if offres_a_rescorer:
+        console.print(f"  [cyan]Rescoring de {len(offres_a_rescorer)} offres LinkedIn avec score 0[/cyan]")
+        rescored = 0
+        for offre_row in offres_a_rescorer:
+            offre_dict = dict(offre_row)
+            if not offre_dict.get("intitule") or offre_dict["intitule"].startswith("http"):
+                continue
+            score, explication, points_forts, points_faibles = scorer_offre(offre_row, profil_texte)
+            mettre_a_jour_score(offre_dict["id"], score, explication, points_forts, points_faibles, db_path)
+            rescored += 1
+            time.sleep(1)
+        console.print(f"[green]✓[/green] {rescored} offres LinkedIn rescorées")
+
+    return {**state, "new_offers_count": state.get("new_offers_count", 0) + importees}
+
+
 # ─────────────────────────────────────────────
 # Noeud 1 : Collecte des offres
 # ─────────────────────────────────────────────
 
 def collecter(state: AgentState) -> AgentState:
-    """Collecte en parallèle depuis Adzuna, APEC et Indeed, puis sauvegarde les nouvelles offres."""
-    console.print("\n[bold cyan]▶ Étape 1 / 3 — Collecte des offres[/bold cyan]")
+    """Collecte en parallèle depuis Adzuna, APEC, WTTJ et Indeed/Google, puis sauvegarde les nouvelles offres."""
+    console.print("\n[bold cyan]▶ Étape 1 / 4 — Collecte des offres[/bold cyan]")
 
     app_id = os.getenv("ADZUNA_APP_ID")
     app_key = os.getenv("ADZUNA_APP_KEY")
@@ -324,25 +688,32 @@ def collecter(state: AgentState) -> AgentState:
 
     # Paramètres APEC depuis sources.yaml
     apec_cfg = sources.get("apec", {})
-    apec_location = apec_cfg.get("location", "France")
 
-    # Paramètres Indeed depuis sources.yaml
+    # Paramètres Indeed/Google depuis sources.yaml
     indeed_cfg = sources.get("indeed", {})
     indeed_results_wanted = indeed_cfg.get("results_wanted", 50)
     indeed_hours_old = indeed_cfg.get("hours_old", 72)
     indeed_location = indeed_cfg.get("location", "France")
 
+    # Paramètres WTTJ depuis sources.yaml
+    wttj_cfg = sources.get("wttj", {})
+
+    # Paramètres Google Jobs depuis sources.yaml
+    google_cfg = sources.get("google_jobs", {})
+    google_enabled = google_cfg.get("enabled", True)
+
     init_db(db_path)
 
-    # Lancer les trois scrapers en parallèle
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    # Lancer les quatre scrapers en parallèle
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(_scraper_adzuna, app_id, app_key, profil, sources, db_path): "adzuna",
             executor.submit(_scraper_apec, apec_cfg, apify_token): "apec",
+            executor.submit(_scraper_wttj, wttj_cfg, apify_token, search_term): "wttj",
             executor.submit(
-                _scraper_indeed, search_term, indeed_location,
-                indeed_results_wanted, indeed_hours_old,
-            ): "indeed",
+                _scraper_jobspy, search_term, indeed_location,
+                indeed_results_wanted, indeed_hours_old, google_enabled,
+            ): "jobspy",
         }
         offres_adzuna_nouvelles = 0
         offres_externes: list[dict] = []
@@ -408,10 +779,9 @@ def should_score(state: AgentState) -> str:
 # ─────────────────────────────────────────────
 
 def scorer_batch(state: AgentState) -> AgentState:
-    """Score toutes les offres non scorées avec Gemini via LangChain."""
+    """Score toutes les offres non scorées avec Claude Haiku."""
     console.print("\n[bold cyan]▶ Étape 2 / 3 — Scoring des offres[/bold cyan]")
 
-    api_key = os.getenv("GOOGLE_AI_STUDIO_KEY")
     db_path = os.getenv("DB_PATH", "data/offers.db")
     profil_path = os.getenv("PROFILE_PATH", "config/profile.yaml")
 
@@ -419,13 +789,6 @@ def scorer_batch(state: AgentState) -> AgentState:
         profil = yaml.safe_load(f)
 
     profil_texte = formater_profil(profil)
-
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-3.1-flash-lite-preview",
-        google_api_key=api_key,
-        temperature=0.2,
-        max_output_tokens=1024,
-    )
 
     with get_connection(db_path) as conn:
         offres = conn.execute(
@@ -445,14 +808,14 @@ def scorer_batch(state: AgentState) -> AgentState:
         console.print(f"  [dim]Scoring :[/dim] {intitule}")
 
         score, explication, points_forts, points_faibles = scorer_offre(
-            offre, profil_texte, llm
+            offre, profil_texte
         )
         mettre_a_jour_score(
             offre_dict["id"], score, explication, points_forts, points_faibles, db_path
         )
         if score >= 0:
             scores_ok += 1
-        time.sleep(4)
+        time.sleep(1)
 
     console.print(f"[green]✓[/green] {scores_ok} offres scorées")
     return {**state, "scored_count": scores_ok}
@@ -551,7 +914,7 @@ def generer_excel(state: AgentState) -> AgentState:
             priorite = "★☆☆ FAIBLE"
             fill = GRIS
 
-        # Déduire la source depuis l'URL
+        # Déduire la source depuis l'URL ou la colonne source
         url = offre.get("url") or ""
         if "adzuna" in url:
             source = "Adzuna"
@@ -559,6 +922,10 @@ def generer_excel(state: AgentState) -> AgentState:
             source = "APEC"
         elif "indeed" in url:
             source = "Indeed"
+        elif "welcometothejungle" in url:
+            source = "WTTJ"
+        elif offre.get("source") == "google":
+            source = "Google"
         else:
             source = "—"
 
@@ -608,12 +975,14 @@ def construire_graphe():
     """
     builder = StateGraph(AgentState)
 
+    builder.add_node("collecter_emails", collecter_emails)
     builder.add_node("collecter", collecter)
     builder.add_node("scorer_batch", scorer_batch)
     builder.add_node("generer_rapport", generer_rapport)
     builder.add_node("generer_excel", generer_excel)
 
-    builder.add_edge(START, "collecter")
+    builder.add_edge(START, "collecter_emails")
+    builder.add_edge("collecter_emails", "collecter")
     builder.add_conditional_edges(
         "collecter",
         should_score,
@@ -665,8 +1034,8 @@ def main():
     console.print("\n[bold cyan]Agent de Recherche d'Emploi — Pipeline LangGraph[/bold cyan]")
     console.print("━" * 50)
 
-    if not os.getenv("GOOGLE_AI_STUDIO_KEY"):
-        console.print("[red]Erreur :[/red] GOOGLE_AI_STUDIO_KEY manquante dans .env")
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        console.print("[red]Erreur :[/red] ANTHROPIC_API_KEY manquante dans .env")
         raise SystemExit(1)
 
     if not os.getenv("ADZUNA_APP_ID") or not os.getenv("ADZUNA_APP_KEY"):
@@ -674,7 +1043,6 @@ def main():
         raise SystemExit(1)
 
     etat_initial: AgentState = {
-        "profile": {},
         "new_offers_count": 0,
         "scored_count": 0,
         "report_path": None,

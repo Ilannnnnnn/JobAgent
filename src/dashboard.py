@@ -7,19 +7,26 @@ Utilisation :
 Conserve la fonction exporter_txt() utilisée par pipeline.py.
 """
 
+import hashlib
 import json
 import os
+import re
+import statistics
 import subprocess
 import sys
 from datetime import datetime
 
+import anthropic
+import httpx
 import pandas as pd
 import streamlit as st
+import yaml
 from dotenv import load_dotenv
 
 # Ajouter src/ au path pour importer db.py
 sys.path.insert(0, os.path.dirname(__file__))
 from db import init_db, get_connection
+from scorer import scorer_offre, mettre_a_jour_score, formater_profil
 
 load_dotenv()
 
@@ -47,7 +54,7 @@ def exporter_txt(offres: list, chemin: str) -> None:
     for rang, offre in enumerate(offres, 1):
         score = offre["score"]
 
-        if score >= 80:
+        if score >= 85:
             indicateur = "★★★  PRIORITAIRE"
         elif score >= 60:
             indicateur = "★★☆  À CONSIDÉRER"
@@ -113,21 +120,26 @@ def exporter_txt(offres: list, chemin: str) -> None:
 
 def deriver_source(url: str) -> str:
     url = (url or "").lower()
-    if "adzuna" in url:
-        return "Adzuna"
-    if "apec" in url:
-        return "APEC"
-    if "indeed" in url:
-        return "Indeed"
+    if "adzuna" in url:             return "Adzuna"
+    if "apec" in url:               return "Apec"
+    if "indeed" in url:             return "Indeed"
+    if "welcometothejungle" in url: return "Wttj"
+    if "google" in url:             return "Google"
     return "N/A"
 
 
-def mettre_a_jour_statut(offre_id: str, statut: str, db_path: str) -> None:
+def mettre_a_jour_statut(offre_id: str, nouveau_statut: str, db_path: str) -> None:
     with get_connection(db_path) as conn:
-        conn.execute(
-            "UPDATE offres SET statut = ? WHERE id = ?",
-            (statut, offre_id),
-        )
+        if nouveau_statut == "Postulé":
+            conn.execute(
+                "UPDATE offres SET statut = ?, date_postulation = ? WHERE id = ?",
+                (nouveau_statut, datetime.now().strftime("%d/%m/%Y"), offre_id)
+            )
+        else:
+            conn.execute(
+                "UPDATE offres SET statut = ? WHERE id = ?",
+                (nouveau_statut, offre_id)
+            )
         conn.commit()
 
 
@@ -161,6 +173,217 @@ def colorier_texte(row):
     return [color] * len(row)
 
 
+def rendre_badges_html(score: int, priorite: str, source: str) -> str:
+    if score >= 85:
+        s_bg, s_fg = "#d4edda", "#155724"
+    elif score >= 60:
+        s_bg, s_fg = "#fff3cd", "#856404"
+    else:
+        s_bg, s_fg = "#f8d7da", "#721c24"
+
+    label_p = priorite.replace("★★★ ", "").replace("★★ ", "").replace("★ ", "")
+    if "PRIORITAIRE" in label_p:
+        p_bg, p_fg = "#d4edda", "#155724"
+    elif "CONSIDÉRER" in label_p:
+        p_bg, p_fg = "#fff3cd", "#856404"
+    else:
+        p_bg, p_fg = "#e2e3e5", "#383d41"
+
+    style = (
+        "display:inline-block;padding:2px 10px;border-radius:12px;"
+        "font-size:0.85em;font-weight:600;margin-right:6px;"
+    )
+    return (
+        f'<span style="{style}background:{s_bg};color:{s_fg};">Score {score}/100</span>'
+        f'<span style="{style}background:{p_bg};color:{p_fg};">{label_p}</span>'
+        f'<span style="{style}background:#cfe2ff;color:#084298;">{source}</span>'
+    )
+
+
+def construire_graphique_salaire(salaire_actuel, tous_salaires):
+    def extraire(lib):
+        if not lib:
+            return []
+        vals = []
+        for m in re.findall(r'\d[\d\s]*', lib):
+            try:
+                v = int(m.replace(" ", ""))
+                if v < 500:
+                    v *= 12
+                vals.append(v)
+            except ValueError:
+                pass
+        return vals
+
+    population = []
+    for lib in tous_salaires:
+        population.extend(extraire(lib))
+    if len(population) < 2:
+        return None
+
+    marche_min = min(population) / 1000
+    marche_max = max(population) / 1000
+    mediane    = statistics.median(population) / 1000
+    etendue    = marche_max - marche_min or 1  # évite division par zéro
+
+    vals_offre = extraire(salaire_actuel)
+    offre_min  = min(vals_offre) / 1000 if vals_offre else None
+    offre_max  = max(vals_offre) / 1000 if vals_offre else None
+
+    pct_mediane = (mediane - marche_min) / etendue * 100
+    pct_offre   = (offre_min - marche_min) / etendue * 100 if offre_min is not None else None
+
+    label_offre = (
+        f"{offre_min:.0f}–{offre_max:.0f}k€" if offre_min != offre_max and offre_max is not None
+        else f"{offre_min:.0f}k€"
+    ) if offre_min is not None else None
+
+    trait_offre = (
+        f'<div style="position:absolute;left:{pct_offre:.1f}%;top:0;bottom:0;'
+        f'width:3px;background:#22c55e;border-radius:2px;"></div>'
+    ) if pct_offre is not None else ""
+
+    centre_label = (
+        f'<span style="color:#22c55e;font-weight:700;">Cette offre : {label_offre}</span>'
+        if label_offre else '<span style="color:#6b7280;">—</span>'
+    )
+
+    return f"""
+<div style="background:#1e2530;border-radius:8px;padding:16px 18px;font-family:sans-serif;">
+  <div style="font-size:0.7em;letter-spacing:.08em;color:#6b7280;margin-bottom:10px;">SALAIRE VS MARCHÉ</div>
+  <div style="position:relative;height:12px;background:#374151;border-radius:6px;overflow:visible;margin-bottom:8px;">
+    <div style="position:absolute;left:0;top:0;bottom:0;width:{pct_mediane:.1f}%;background:#3b82f6;border-radius:6px 0 0 6px;"></div>
+    {trait_offre}
+  </div>
+  <div style="display:flex;justify-content:space-between;font-size:0.78em;margin-bottom:6px;">
+    <span style="color:#6b7280;">{marche_min:.0f}k€</span>
+    {centre_label}
+    <span style="color:#6b7280;">{marche_max:.0f}k€</span>
+  </div>
+  <div style="text-align:center;font-size:0.75em;color:#6b7280;">Médiane marché : ~{mediane:.0f}k€</div>
+</div>"""
+
+
+def importer_offre_manuelle(input_offre: str, mode: str, db_path: str) -> tuple[dict, int]:
+    """
+    Importe une offre depuis une URL (via Tavily Extract) ou du texte brut,
+    extrait les champs via Claude Haiku, insère en DB et score immédiatement.
+    Retourne (offre_dict, score).
+    """
+    if mode == "URL":
+        tavily_key = os.getenv("TAVILY_API_KEY", "")
+        resp = httpx.post(
+            "https://api.tavily.com/extract",
+            json={"urls": [input_offre], "api_key": tavily_key},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        contenu = resp.json().get("results", [{}])[0].get("raw_content", "")
+    else:
+        contenu = input_offre
+
+    client_ai = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    prompt = f"""Extrais les informations de cette offre d'emploi et retourne UNIQUEMENT un JSON valide avec ces champs exacts :
+{{
+  "titre": "...",
+  "entreprise": "...",
+  "localisation": "...",
+  "type_contrat": "...",
+  "salaire": "...",
+  "description": "...",
+  "url": "..."
+}}
+
+Si un champ est absent, mets une chaîne vide "".
+Pour l'URL : si le mode est URL utilise l'URL fournie, sinon mets "".
+Ne retourne rien d'autre que le JSON.
+
+Offre :
+{contenu[:6000]}
+"""
+
+    response = client_ai.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    texte = response.content[0].text.strip()
+    texte = texte.strip("```json").strip("```").strip()
+    offre_dict = json.loads(texte)
+
+    if mode == "URL" and not offre_dict.get("url"):
+        offre_dict["url"] = input_offre
+
+    url = offre_dict.get("url", "")
+    offre_db = {
+        "id": f"manuel_{hashlib.md5(url.encode() if url else os.urandom(16)).hexdigest()[:12]}",
+        "intitule": offre_dict.get("titre", ""),
+        "description": offre_dict.get("description", ""),
+        "entreprise_nom": offre_dict.get("entreprise", ""),
+        "lieu_travail": offre_dict.get("localisation", ""),
+        "type_contrat": offre_dict.get("type_contrat", ""),
+        "salaire_libelle": offre_dict.get("salaire", ""),
+        "date_creation": datetime.now().strftime("%Y-%m-%d"),
+        "url": url,
+        "raw_json": json.dumps(offre_dict, ensure_ascii=False),
+        "source": "manuel",
+    }
+
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO offres
+            (id, intitule, description, entreprise_nom, lieu_travail,
+             type_contrat, salaire_libelle, date_creation, url, raw_json, source)
+            VALUES
+            (:id, :intitule, :description, :entreprise_nom, :lieu_travail,
+             :type_contrat, :salaire_libelle, :date_creation, :url, :raw_json, :source)
+            """,
+            offre_db,
+        )
+        conn.commit()
+
+    profil_path = os.getenv("PROFILE_PATH", "config/profile.yaml")
+    with open(profil_path, encoding="utf-8") as f:
+        profil = yaml.safe_load(f)
+    profil_texte = formater_profil(profil)
+
+    with get_connection(db_path) as conn:
+        offre_row = conn.execute(
+            "SELECT * FROM offres WHERE id = ?", (offre_db["id"],)
+        ).fetchone()
+
+    score = -1
+    if offre_row:
+        score, explication, points_forts, points_faibles = scorer_offre(offre_row, profil_texte)
+        mettre_a_jour_score(offre_db["id"], score, explication, points_forts, points_faibles, db_path)
+
+    return offre_dict, score
+
+
+def obtenir_info_entreprise(nom: str):
+    api_key = os.getenv("TAVILY_API_KEY", "").strip()
+    if not api_key:
+        return None
+    try:
+        resp = httpx.post(
+            "https://api.tavily.com/search",
+            json={
+                "query": f"{nom} entreprise secteur activité",
+                "max_results": 1,
+                "api_key": api_key,
+            },
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if results:
+            return results[0].get("content") or results[0].get("snippet")
+    except Exception:
+        pass
+    return None
+
+
 # ─────────────────────────────────────────────
 # App principale
 # ─────────────────────────────────────────────
@@ -180,7 +403,7 @@ def main():
 
     score_min = st.sidebar.slider("Score minimum", 0, 100, 60)
 
-    sources_dispo = ["Adzuna", "Indeed", "APEC"]
+    sources_dispo = ["Adzuna", "Indeed", "Apec", "Wttj", "Google", "Manuel", "Linkedin"]
     sources = st.sidebar.multiselect("Source", sources_dispo, default=sources_dispo)
 
     contrats_dispo = ["CDI", "CDD", "Freelance", "N/A"]
@@ -188,6 +411,31 @@ def main():
 
     statuts_dispo = ["À postuler", "Postulé", "Refusé", "Entretien"]
     statuts = st.sidebar.multiselect("Statut", statuts_dispo, default=statuts_dispo)
+
+    st.sidebar.divider()
+    st.sidebar.markdown("### Ajouter une offre")
+    mode_import = st.sidebar.radio(
+        "Mode", ["URL", "Texte brut"], horizontal=True, label_visibility="collapsed"
+    )
+    if mode_import == "URL":
+        input_offre = st.sidebar.text_input("URL de l'offre", placeholder="https://...")
+    else:
+        input_offre = st.sidebar.text_area("Colle le texte de l'offre", height=150)
+    btn_importer = st.sidebar.button("Importer", type="primary", use_container_width=True)
+
+    if btn_importer:
+        if not input_offre or not input_offre.strip():
+            st.sidebar.error("Erreur : champ vide.")
+        else:
+            with st.sidebar.status("Import en cours…"):
+                try:
+                    offre_dict, score = importer_offre_manuelle(input_offre.strip(), mode_import, DB_PATH)
+                    st.sidebar.success(
+                        f"✓ Offre importée et scorée : {offre_dict.get('titre', '')} — Score : {score}/100"
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.sidebar.error(f"Erreur : {exc}")
 
     st.sidebar.divider()
 
@@ -221,7 +469,7 @@ def main():
         return
 
     # Colonnes dérivées
-    df_complet["Source"] = df_complet["url"].apply(deriver_source)
+    df_complet["Source"] = df_complet["source"].str.capitalize().fillna("Inconnu")
     df_complet["Priorité"] = df_complet["score"].apply(deriver_priorite)
     df_complet["statut"] = df_complet["statut"].fillna("À postuler")
 
@@ -235,9 +483,10 @@ def main():
     df_complet["_contrat_norm"] = df_complet["type_contrat"].apply(normaliser_contrat)
 
     # Application des filtres
+    sources_lower = [s.lower() for s in sources]
     mask = (
         (df_complet["score"] >= score_min)
-        & (df_complet["Source"].isin(sources))
+        & (df_complet["source"].str.lower().isin(sources_lower))
         & (df_complet["statut"].isin(statuts))
     )
 
@@ -275,9 +524,14 @@ def main():
         st.warning("Aucune offre ne correspond aux filtres sélectionnés.")
         return
 
+    # Colonne date_postulation : vide si non postulée
+    if "date_postulation" not in df_filtre.columns:
+        df_filtre["date_postulation"] = ""
+    df_filtre["date_postulation"] = df_filtre["date_postulation"].fillna("")
+
     cols_affichage = ["score", "Priorité", "intitule", "entreprise_nom",
                       "lieu_travail", "type_contrat", "salaire_libelle",
-                      "Source", "statut", "url"]
+                      "Source", "statut", "date_postulation", "url"]
     rename_map = {
         "score": "Score",
         "intitule": "Poste",
@@ -286,6 +540,7 @@ def main():
         "type_contrat": "Contrat",
         "salaire_libelle": "Salaire",
         "statut": "Statut",
+        "date_postulation": "Postulé le",
         "url": "URL",
     }
 
