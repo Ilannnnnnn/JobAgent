@@ -17,11 +17,13 @@ import sys
 from datetime import datetime
 
 import anthropic
+import folium
 import httpx
 import pandas as pd
 import streamlit as st
 import yaml
 from dotenv import load_dotenv
+from streamlit_folium import st_folium
 
 # Ajouter src/ au path pour importer db.py
 sys.path.insert(0, os.path.dirname(__file__))
@@ -385,6 +387,145 @@ def obtenir_info_entreprise(nom: str):
 
 
 # ─────────────────────────────────────────────
+# Géolocalisation statique
+# ─────────────────────────────────────────────
+
+VILLES_COORDS = {
+    # France
+    "paris": (48.8566, 2.3522),
+    "lyon": (45.7640, 4.8357),
+    "bordeaux": (44.8378, -0.5792),
+    "lille": (50.6292, 3.0573),
+    "nantes": (47.2184, -1.5536),
+    "toulouse": (43.6047, 1.4442),
+    "marseille": (43.2965, 5.3698),
+    "strasbourg": (48.5734, 7.7521),
+    "rennes": (48.1173, -1.6778),
+    "lannion": (48.7325, -3.4595),
+    "brest": (48.3905, -4.4860),
+    # Belgique
+    "bruxelles": (50.8503, 4.3517),
+    "brussels": (50.8503, 4.3517),
+    "anvers": (51.2194, 4.4025),
+    "gand": (51.0543, 3.7174),
+    "louvain": (50.8798, 4.7005),
+    "liège": (50.6292, 5.5797),
+    # Suisse
+    "zurich": (47.3769, 8.5417),
+    "genève": (46.2044, 6.1432),
+    "geneva": (46.2044, 6.1432),
+    "lausanne": (46.5197, 6.6323),
+    "berne": (46.9481, 7.4474),
+    "bâle": (47.5596, 7.5886),
+    # Espagne
+    "madrid": (40.4168, -3.7038),
+    "barcelone": (41.3851, 2.1734),
+    "barcelona": (41.3851, 2.1734),
+    "valence": (39.4699, -0.3763),
+    # Portugal
+    "lisbonne": (38.7169, -9.1395),
+    "lisbon": (38.7169, -9.1395),
+    "porto": (41.1579, -8.6291),
+    # Italie
+    "milan": (45.4654, 9.1859),
+    "rome": (41.9028, 12.4964),
+    "turin": (45.0703, 7.6869),
+    # Pays-Bas
+    "amsterdam": (52.3676, 4.9041),
+    "rotterdam": (51.9244, 4.4777),
+    # Allemagne
+    "berlin": (52.5200, 13.4050),
+    "munich": (48.1351, 11.5820),
+    "hambourg": (53.5753, 10.0153),
+    "frankfurt": (50.1109, 8.6821),
+    # UK
+    "london": (51.5074, -0.1278),
+    "londres": (51.5074, -0.1278),
+    # Remote
+    "remote": (48.8566, 2.3522),
+    "à distance": (48.8566, 2.3522),
+    "full remote": (48.8566, 2.3522),
+}
+
+
+def get_coords(lieu: str):
+    """Retourne les coordonnées GPS d'une ville depuis le texte de localisation."""
+    if not lieu:
+        return None
+    lieu_lower = lieu.lower()
+    for ville, coords in VILLES_COORDS.items():
+        if ville in lieu_lower:
+            return coords
+    return None
+
+
+def get_couleur_pin(score):
+    """Couleur du pin selon le score."""
+    if score is None or score < 0:
+        return "gray"
+    if score >= 85:
+        return "green"
+    if score >= 60:
+        return "orange"
+    return "red"
+
+
+def afficher_carte(df):
+    st.subheader("Carte des offres")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.markdown("🟢 **Prioritaire** (≥ 85)")
+    col2.markdown("🟠 **À considérer** (60–84)")
+    col3.markdown("🔴 **Faible** (< 60)")
+    col4.markdown("⚪ **Non scorée**")
+
+    m = folium.Map(location=[48.0, 8.0], zoom_start=5, tiles="CartoDB positron")
+
+    nb_pins = 0
+    for _, row in df.iterrows():
+        coords = get_coords(str(row.get("lieu_travail", "") or ""))
+        if not coords:
+            continue
+
+        score = row.get("score", None)
+        couleur = get_couleur_pin(score)
+        titre = row.get("intitule", "Offre") or "Offre"
+        entreprise = row.get("entreprise_nom", "") or ""
+        lieu = row.get("lieu_travail", "") or ""
+        url = row.get("url", "") or ""
+        source = row.get("source", "") or ""
+
+        if score is not None and score >= 85:
+            score_color = "#2d6a4f"
+        elif score is not None and score >= 60:
+            score_color = "#e07b00"
+        else:
+            score_color = "#cc0000"
+
+        lien_html = f"<a href='{url}' target='_blank'>Voir l'offre</a>" if url else ""
+        popup_html = f"""
+        <div style="font-family: sans-serif; min-width: 200px;">
+            <b style="font-size:14px">{titre}</b><br>
+            <span style="color:#555">{entreprise}</span><br>
+            <span style="color:#888;font-size:12px">{lieu} · {source}</span><br>
+            <b style="color:{score_color}">Score : {score}/100</b><br>
+            {lien_html}
+        </div>
+        """
+
+        folium.Marker(
+            location=coords,
+            popup=folium.Popup(popup_html, max_width=300),
+            tooltip=f"{titre} — {entreprise} ({score}/100)",
+            icon=folium.Icon(color=couleur, icon="briefcase", prefix="fa"),
+        ).add_to(m)
+        nb_pins += 1
+
+    st.caption(f"{nb_pins} offres géolocalisées sur {len(df)} au total")
+    st_folium(m, width=None, height=600, returned_objects=[])
+
+
+# ─────────────────────────────────────────────
 # App principale
 # ─────────────────────────────────────────────
 
@@ -503,260 +644,267 @@ def main():
 
     df_filtre = df_complet[mask].reset_index(drop=True)
 
-    # ── Métriques ────────────────────────────
-    total = len(df_complet)
-    prioritaires = int((df_complet["score"] >= 85).sum())
-    postulees = int((df_complet["statut"] == "Postulé").sum())
-    score_moyen = df_complet["score"].mean()
+    # ── Onglets principaux ────────────────────
+    onglet_dashboard, onglet_carte = st.tabs(["📋 Dashboard", "🗺️ Carte des offres"])
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total offres scorées", total)
-    m2.metric("Prioritaires (≥ 85)", prioritaires)
-    m3.metric("Postulées", postulees)
-    m4.metric("Score moyen", f"{score_moyen:.1f}" if not pd.isna(score_moyen) else "—")
+    with onglet_carte:
+        afficher_carte(df_filtre)
 
-    st.divider()
+    with onglet_dashboard:
+        # ── Métriques ────────────────────────────
+        total = len(df_complet)
+        prioritaires = int((df_complet["score"] >= 85).sum())
+        postulees = int((df_complet["statut"] == "Postulé").sum())
+        score_moyen = df_complet["score"].mean()
 
-    # ── DataFrames par statut ─────────────────
-    if df_filtre.empty:
-        st.warning("Aucune offre ne correspond aux filtres sélectionnés.")
-        return
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total offres scorées", total)
+        m2.metric("Prioritaires (≥ 85)", prioritaires)
+        m3.metric("Postulées", postulees)
+        m4.metric("Score moyen", f"{score_moyen:.1f}" if not pd.isna(score_moyen) else "—")
 
-    # Colonne date_postulation : vide si non postulée
-    if "date_postulation" not in df_filtre.columns:
-        df_filtre["date_postulation"] = ""
-    df_filtre["date_postulation"] = df_filtre["date_postulation"].fillna("")
+        st.divider()
 
-    cols_affichage = ["score", "Priorité", "intitule", "entreprise_nom",
-                      "lieu_travail", "type_contrat", "salaire_libelle",
-                      "Source", "statut", "date_postulation", "url"]
-    rename_map = {
-        "score": "Score",
-        "intitule": "Poste",
-        "entreprise_nom": "Entreprise",
-        "lieu_travail": "Lieu",
-        "type_contrat": "Contrat",
-        "salaire_libelle": "Salaire",
-        "statut": "Statut",
-        "date_postulation": "Postulé le",
-        "url": "URL",
-    }
+        # ── DataFrames par statut ─────────────────
+        if df_filtre.empty:
+            st.warning("Aucune offre ne correspond aux filtres sélectionnés.")
+            return
 
-    st.markdown("""
+        # Colonne date_postulation : vide si non postulée
+        if "date_postulation" not in df_filtre.columns:
+            df_filtre["date_postulation"] = ""
+        df_filtre["date_postulation"] = df_filtre["date_postulation"].fillna("")
+
+        cols_affichage = ["score", "Priorité", "intitule", "entreprise_nom",
+                          "lieu_travail", "type_contrat", "salaire_libelle",
+                          "Source", "statut", "date_postulation", "url"]
+        rename_map = {
+            "score": "Score",
+            "intitule": "Poste",
+            "entreprise_nom": "Entreprise",
+            "lieu_travail": "Lieu",
+            "type_contrat": "Contrat",
+            "salaire_libelle": "Salaire",
+            "statut": "Statut",
+            "date_postulation": "Postulé le",
+            "url": "URL",
+        }
+
+        st.markdown("""
 <style>
 [data-testid="stDataFrame"] td { color: var(--text-color) !important; }
 </style>
 """, unsafe_allow_html=True)
 
-    def build_styled(df_tab):
-        df_aff = df_tab[cols_affichage].rename(columns=rename_map)
-        return (
-            df_aff.style
-            .apply(colorier_texte, axis=1)
-            .map(lambda _: "font-weight: bold", subset=["Score"])
+        def build_styled(df_tab):
+            df_aff = df_tab[cols_affichage].rename(columns=rename_map)
+            return (
+                df_aff.style
+                .apply(colorier_texte, axis=1)
+                .map(lambda _: "font-weight: bold", subset=["Score"])
+            )
+
+        col_config = {"URL": st.column_config.LinkColumn("URL", display_text="Lien")}
+        dataframe_kwargs = dict(
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            column_config=col_config,
         )
 
-    col_config = {"URL": st.column_config.LinkColumn("URL", display_text="Lien")}
-    dataframe_kwargs = dict(
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        column_config=col_config,
-    )
+        # ── DataFrames par statut (avant st.tabs pour les compteurs) ─────────
+        df_a_postuler = df_filtre[df_filtre["statut"].isin(["À postuler", "", None]) | df_filtre["statut"].isna()].reset_index(drop=True)
+        df_postule = df_filtre[df_filtre["statut"] == "Postulé"].reset_index(drop=True)
+        df_entretien = df_filtre[df_filtre["statut"] == "Entretien"].reset_index(drop=True)
+        df_refuse = df_filtre[df_filtre["statut"] == "Refusé"].reset_index(drop=True)
 
-    # ── DataFrames par statut (avant st.tabs pour les compteurs) ─────────
-    df_a_postuler = df_filtre[df_filtre["statut"].isin(["À postuler", "", None]) | df_filtre["statut"].isna()].reset_index(drop=True)
-    df_postule = df_filtre[df_filtre["statut"] == "Postulé"].reset_index(drop=True)
-    df_entretien = df_filtre[df_filtre["statut"] == "Entretien"].reset_index(drop=True)
-    df_refuse = df_filtre[df_filtre["statut"] == "Refusé"].reset_index(drop=True)
+        # ── Onglets statut ────────────────────────
+        onglet_a_postuler, onglet_postule, onglet_entretien, onglet_refuse = st.tabs([
+            f"📋 À postuler ({len(df_a_postuler)})",
+            f"✅ Postulé ({len(df_postule)})",
+            f"🎯 Entretien ({len(df_entretien)})",
+            f"❌ Refusé ({len(df_refuse)})",
+        ])
 
-    # ── Onglets ───────────────────────────────
-    onglet_a_postuler, onglet_postule, onglet_entretien, onglet_refuse = st.tabs([
-        f"📋 À postuler ({len(df_a_postuler)})",
-        f"✅ Postulé ({len(df_postule)})",
-        f"🎯 Entretien ({len(df_entretien)})",
-        f"❌ Refusé ({len(df_refuse)})",
-    ])
+        with onglet_a_postuler:
+            selection_a_postuler = st.dataframe(build_styled(df_a_postuler), key="table_a_postuler", **dataframe_kwargs)
 
-    with onglet_a_postuler:
-        selection_a_postuler = st.dataframe(build_styled(df_a_postuler), key="table_a_postuler", **dataframe_kwargs)
+        with onglet_postule:
+            selection_postule = st.dataframe(build_styled(df_postule), key="table_postule", **dataframe_kwargs)
 
-    with onglet_postule:
-        selection_postule = st.dataframe(build_styled(df_postule), key="table_postule", **dataframe_kwargs)
+        with onglet_entretien:
+            selection_entretien = st.dataframe(build_styled(df_entretien), key="table_entretien", **dataframe_kwargs)
 
-    with onglet_entretien:
-        selection_entretien = st.dataframe(build_styled(df_entretien), key="table_entretien", **dataframe_kwargs)
+        with onglet_refuse:
+            selection_refuse = st.dataframe(build_styled(df_refuse), key="table_refuse", **dataframe_kwargs)
 
-    with onglet_refuse:
-        selection_refuse = st.dataframe(build_styled(df_refuse), key="table_refuse", **dataframe_kwargs)
+        # ── Panneau détail ────────────────────────
+        offre_selectionnee = None
+        if selection_a_postuler.selection.rows:
+            idx = selection_a_postuler.selection.rows[0]
+            offre_selectionnee = df_a_postuler.iloc[idx]
+        elif selection_postule.selection.rows:
+            idx = selection_postule.selection.rows[0]
+            offre_selectionnee = df_postule.iloc[idx]
+        elif selection_entretien.selection.rows:
+            idx = selection_entretien.selection.rows[0]
+            offre_selectionnee = df_entretien.iloc[idx]
+        elif selection_refuse.selection.rows:
+            idx = selection_refuse.selection.rows[0]
+            offre_selectionnee = df_refuse.iloc[idx]
 
-    # ── Panneau détail ────────────────────────
-    offre_selectionnee = None
-    if selection_a_postuler.selection.rows:
-        idx = selection_a_postuler.selection.rows[0]
-        offre_selectionnee = df_a_postuler.iloc[idx]
-    elif selection_postule.selection.rows:
-        idx = selection_postule.selection.rows[0]
-        offre_selectionnee = df_postule.iloc[idx]
-    elif selection_entretien.selection.rows:
-        idx = selection_entretien.selection.rows[0]
-        offre_selectionnee = df_entretien.iloc[idx]
-    elif selection_refuse.selection.rows:
-        idx = selection_refuse.selection.rows[0]
-        offre_selectionnee = df_refuse.iloc[idx]
+        if offre_selectionnee is not None:
+            offre = offre_selectionnee
 
-    if offre_selectionnee is not None:
-        offre = offre_selectionnee
+            st.divider()
+            st.subheader(f"Détail — {offre.get('intitule', '')}")
 
-        st.divider()
-        st.subheader(f"Détail — {offre.get('intitule', '')}")
+            col_gauche, col_droite = st.columns([3, 1])
 
-        col_gauche, col_droite = st.columns([3, 1])
+            with col_gauche:
+                st.markdown(f"**Entreprise :** {offre.get('entreprise_nom') or '—'}  \n"
+                            f"**Lieu :** {offre.get('lieu_travail') or '—'}  \n"
+                            f"**Contrat :** {offre.get('type_contrat') or '—'}  \n"
+                            f"**Salaire :** {offre.get('salaire_libelle') or '—'}  \n"
+                            f"**Score :** {offre.get('score')}/100")
 
-        with col_gauche:
-            st.markdown(f"**Entreprise :** {offre.get('entreprise_nom') or '—'}  \n"
-                        f"**Lieu :** {offre.get('lieu_travail') or '—'}  \n"
-                        f"**Contrat :** {offre.get('type_contrat') or '—'}  \n"
-                        f"**Salaire :** {offre.get('salaire_libelle') or '—'}  \n"
-                        f"**Score :** {offre.get('score')}/100")
+                with st.expander("Analyse complète", expanded=True):
+                    st.write(offre.get("score_explication") or "—")
 
-            with st.expander("Analyse complète", expanded=True):
-                st.write(offre.get("score_explication") or "—")
-
-            col_pf, col_pfai = st.columns(2)
-            with col_pf:
-                st.markdown("**Points forts**")
-                try:
-                    points_forts = json.loads(offre.get("score_points_forts") or "[]")
-                    for p in points_forts:
-                        st.markdown(f"✅ {p}")
-                    if not points_forts:
+                col_pf, col_pfai = st.columns(2)
+                with col_pf:
+                    st.markdown("**Points forts**")
+                    try:
+                        points_forts = json.loads(offre.get("score_points_forts") or "[]")
+                        for p in points_forts:
+                            st.markdown(f"✅ {p}")
+                        if not points_forts:
+                            st.write("—")
+                    except (json.JSONDecodeError, TypeError):
                         st.write("—")
-                except (json.JSONDecodeError, TypeError):
-                    st.write("—")
 
-            with col_pfai:
-                st.markdown("**Points faibles**")
-                try:
-                    points_faibles = json.loads(offre.get("score_points_faibles") or "[]")
-                    for p in points_faibles:
-                        st.markdown(f"❌ {p}")
-                    if not points_faibles:
+                with col_pfai:
+                    st.markdown("**Points faibles**")
+                    try:
+                        points_faibles = json.loads(offre.get("score_points_faibles") or "[]")
+                        for p in points_faibles:
+                            st.markdown(f"❌ {p}")
+                        if not points_faibles:
+                            st.write("—")
+                    except (json.JSONDecodeError, TypeError):
                         st.write("—")
-                except (json.JSONDecodeError, TypeError):
-                    st.write("—")
 
-        with col_droite:
-            st.markdown("**Actions**")
+            with col_droite:
+                st.markdown("**Actions**")
 
-            # Changement de statut
-            statuts_liste = ["À postuler", "Postulé", "Refusé", "Entretien"]
-            statut_actuel = offre.get("statut") or "À postuler"
-            if statut_actuel not in statuts_liste:
-                statut_actuel = "À postuler"
+                # Changement de statut
+                statuts_liste = ["À postuler", "Postulé", "Refusé", "Entretien"]
+                statut_actuel = offre.get("statut") or "À postuler"
+                if statut_actuel not in statuts_liste:
+                    statut_actuel = "À postuler"
 
-            nouveau_statut = st.selectbox(
-                "Statut candidature",
-                statuts_liste,
-                index=statuts_liste.index(statut_actuel),
-                key=f"statut_{offre['id']}",
-            )
-            if nouveau_statut != statut_actuel:
-                mettre_a_jour_statut(offre["id"], nouveau_statut, DB_PATH)
-                st.rerun()
+                nouveau_statut = st.selectbox(
+                    "Statut candidature",
+                    statuts_liste,
+                    index=statuts_liste.index(statut_actuel),
+                    key=f"statut_{offre['id']}",
+                )
+                if nouveau_statut != statut_actuel:
+                    mettre_a_jour_statut(offre["id"], nouveau_statut, DB_PATH)
+                    st.rerun()
 
-            # Ouvrir l'offre
-            url_offre = offre.get("url") or ""
-            if url_offre:
-                st.link_button("Ouvrir l'offre", url_offre, use_container_width=True)
+                # Ouvrir l'offre
+                url_offre = offre.get("url") or ""
+                if url_offre:
+                    st.link_button("Ouvrir l'offre", url_offre, use_container_width=True)
 
-            # Adapter le CV
-            if st.button("Postuler (adapter CV)", key=f"cv_{offre['id']}", use_container_width=True):
-                with st.spinner("Adaptation du CV en cours..."):
-                    result = subprocess.run(
-                        ["python", "src/cv_adapter.py", "--offre-id", offre["id"]],
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                    )
-                if result.returncode == 0:
-                    offre_id_court = offre["id"].replace("adzuna_", "")[:12]
-                    cv_path = os.path.join("cv", f"cv_adapte_{offre_id_court}.html")
-                    st.success(f"CV adapté généré : {cv_path}")
-                else:
-                    st.error(result.stderr or "Erreur lors de l'adaptation du CV.")
-
-        st.write("DEBUG: section enrichissement visible")
-
-        # ── Enrichissement offre ──────────────────
-        with st.expander("📋 Enrichir l'offre avec la description complète"):
-            st.caption("Colle ici la description complète de l'offre pour améliorer le scoring et l'adaptation du CV.")
-            description_complete = st.text_area(
-                "Description complète",
-                value=offre.get("description", "") or "",
-                height=300,
-                key=f"desc_enrichie_{offre['id']}",
-            )
-            if st.button("💾 Sauvegarder et rescorer", key=f"btn_enrichir_{offre['id']}"):
-                if description_complete.strip():
-                    with get_connection(DB_PATH) as conn:
-                        conn.execute(
-                            "UPDATE offres SET description = ? WHERE id = ?",
-                            (description_complete.strip(), offre["id"]),
+                # Adapter le CV
+                if st.button("Postuler (adapter CV)", key=f"cv_{offre['id']}", use_container_width=True):
+                    with st.spinner("Adaptation du CV en cours..."):
+                        result = subprocess.run(
+                            ["python", "src/cv_adapter.py", "--offre-id", offre["id"]],
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
                         )
+                    if result.returncode == 0:
+                        offre_id_court = offre["id"].replace("adzuna_", "")[:12]
+                        cv_path = os.path.join("cv", f"cv_adapte_{offre_id_court}.html")
+                        st.success(f"CV adapté généré : {cv_path}")
+                    else:
+                        st.error(result.stderr or "Erreur lors de l'adaptation du CV.")
+
+            st.write("DEBUG: section enrichissement visible")
+
+            # ── Enrichissement offre ──────────────────
+            with st.expander("📋 Enrichir l'offre avec la description complète"):
+                st.caption("Colle ici la description complète de l'offre pour améliorer le scoring et l'adaptation du CV.")
+                description_complete = st.text_area(
+                    "Description complète",
+                    value=offre.get("description", "") or "",
+                    height=300,
+                    key=f"desc_enrichie_{offre['id']}",
+                )
+                if st.button("💾 Sauvegarder et rescorer", key=f"btn_enrichir_{offre['id']}"):
+                    if description_complete.strip():
+                        with get_connection(DB_PATH) as conn:
+                            conn.execute(
+                                "UPDATE offres SET description = ? WHERE id = ?",
+                                (description_complete.strip(), offre["id"]),
+                            )
+                            conn.commit()
+
+                        from scorer import scorer_offre, mettre_a_jour_score, formater_profil
+                        import yaml
+                        from langchain_google_genai import ChatGoogleGenerativeAI
+
+                        api_key = os.getenv("GOOGLE_AI_STUDIO_KEY")
+                        profil_path = os.getenv("PROFILE_PATH", "config/profile.yaml")
+                        with open(profil_path, encoding="utf-8") as f:
+                            profil = yaml.safe_load(f)
+                        profil_texte = formater_profil(profil)
+
+                        with get_connection(DB_PATH) as conn:
+                            offre_row = conn.execute(
+                                "SELECT * FROM offres WHERE id = ?", (offre["id"],)
+                            ).fetchone()
+
+                        if offre_row and api_key:
+                            llm = ChatGoogleGenerativeAI(
+                                model="gemini-3.1-flash-lite-preview",
+                                google_api_key=api_key,
+                                temperature=0.2,
+                                max_output_tokens=1024,
+                            )
+                            score, explication, points_forts, points_faibles = scorer_offre(
+                                offre_row, profil_texte, llm
+                            )
+                            mettre_a_jour_score(
+                                offre["id"], score, explication, points_forts, points_faibles, DB_PATH
+                            )
+                            st.success(f"✓ Offre enrichie et rescorée : {score}/100")
+                            st.rerun()
+                        elif not api_key:
+                            st.error("GOOGLE_AI_STUDIO_KEY manquante dans .env")
+                    else:
+                        st.warning("La description est vide.")
+
+            # ── Zone dangereuse ───────────────────────
+            st.divider()
+            confirm_key = f"confirm_del_{offre['id']}"
+            if st.button("Supprimer cette offre", type="secondary", key=f"del_{offre['id']}"):
+                st.session_state[confirm_key] = True
+
+            if st.session_state.get(confirm_key):
+                st.warning("Confirmer la suppression ?")
+                if st.button("Confirmer", key=f"confirm_{offre['id']}"):
+                    with get_connection(DB_PATH) as conn:
+                        conn.execute("DELETE FROM offres WHERE id = ?", (offre["id"],))
                         conn.commit()
-
-                    from scorer import scorer_offre, mettre_a_jour_score, formater_profil
-                    import yaml
-                    from langchain_google_genai import ChatGoogleGenerativeAI
-
-                    api_key = os.getenv("GOOGLE_AI_STUDIO_KEY")
-                    profil_path = os.getenv("PROFILE_PATH", "config/profile.yaml")
-                    with open(profil_path, encoding="utf-8") as f:
-                        profil = yaml.safe_load(f)
-                    profil_texte = formater_profil(profil)
-
-                    with get_connection(DB_PATH) as conn:
-                        offre_row = conn.execute(
-                            "SELECT * FROM offres WHERE id = ?", (offre["id"],)
-                        ).fetchone()
-
-                    if offre_row and api_key:
-                        llm = ChatGoogleGenerativeAI(
-                            model="gemini-3.1-flash-lite-preview",
-                            google_api_key=api_key,
-                            temperature=0.2,
-                            max_output_tokens=1024,
-                        )
-                        score, explication, points_forts, points_faibles = scorer_offre(
-                            offre_row, profil_texte, llm
-                        )
-                        mettre_a_jour_score(
-                            offre["id"], score, explication, points_forts, points_faibles, DB_PATH
-                        )
-                        st.success(f"✓ Offre enrichie et rescorée : {score}/100")
-                        st.rerun()
-                    elif not api_key:
-                        st.error("GOOGLE_AI_STUDIO_KEY manquante dans .env")
-                else:
-                    st.warning("La description est vide.")
-
-        # ── Zone dangereuse ───────────────────────
-        st.divider()
-        confirm_key = f"confirm_del_{offre['id']}"
-        if st.button("Supprimer cette offre", type="secondary", key=f"del_{offre['id']}"):
-            st.session_state[confirm_key] = True
-
-        if st.session_state.get(confirm_key):
-            st.warning("Confirmer la suppression ?")
-            if st.button("Confirmer", key=f"confirm_{offre['id']}"):
-                with get_connection(DB_PATH) as conn:
-                    conn.execute("DELETE FROM offres WHERE id = ?", (offre["id"],))
-                    conn.commit()
-                st.session_state.pop(confirm_key, None)
-                st.rerun()
+                    st.session_state.pop(confirm_key, None)
+                    st.rerun()
 
 
 if __name__ == "__main__":
