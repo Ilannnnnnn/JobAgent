@@ -460,8 +460,14 @@ def get_coords(lieu: str):
     return None
 
 
-def get_couleur_pin(score):
-    """Couleur du pin selon le score."""
+def get_couleur_pin(score, statut=None):
+    """Couleur du pin selon le statut puis le score."""
+    if statut == "Postulé":
+        return "blue"
+    if statut == "Entretien":
+        return "purple"
+    if statut == "Refusé":
+        return "gray"
     if score is None or score < 0:
         return "gray"
     if score >= 85:
@@ -472,24 +478,54 @@ def get_couleur_pin(score):
 
 
 def afficher_carte(df):
+    from folium.plugins import MarkerCluster
+
     st.subheader("Carte des offres")
 
+    # Filtres statut
+    st.markdown("**Afficher les statuts :**")
+    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+    show_a_postuler = col_s1.checkbox("📋 À postuler", value=True)
+    show_postule = col_s2.checkbox("✅ Postulé", value=True)
+    show_entretien = col_s3.checkbox("🎯 Entretien", value=True)
+    show_refuse = col_s4.checkbox("❌ Refusé", value=False)
+
+    statuts_affiches = []
+    if show_a_postuler:
+        statuts_affiches.append("À postuler")
+    if show_postule:
+        statuts_affiches.append("Postulé")
+    if show_entretien:
+        statuts_affiches.append("Entretien")
+    if show_refuse:
+        statuts_affiches.append("Refusé")
+
+    # Légende
     col1, col2, col3, col4 = st.columns(4)
     col1.markdown("🟢 **Prioritaire** (≥ 85)")
     col2.markdown("🟠 **À considérer** (60–84)")
     col3.markdown("🔴 **Faible** (< 60)")
-    col4.markdown("⚪ **Non scorée**")
+    col4.markdown("🔵 **Postulé** · 🟣 **Entretien**")
+
+    # Tri par score décroissant + limite
+    df_carte = df.sort_values("score", ascending=False).head(300)
+    if statuts_affiches:
+        df_carte = df_carte[df_carte["statut"].isin(statuts_affiches)]
 
     m = folium.Map(location=[48.0, 8.0], zoom_start=5, tiles="CartoDB positron")
+    cluster = MarkerCluster(
+        options={"maxClusterRadius": 40, "disableClusteringAtZoom": 8}
+    ).add_to(m)
 
     nb_pins = 0
-    for _, row in df.iterrows():
+    for _, row in df_carte.iterrows():
         coords = get_coords(str(row.get("lieu_travail", "") or ""))
         if not coords:
             continue
 
         score = row.get("score", None)
-        couleur = get_couleur_pin(score)
+        statut = row.get("statut", "") or ""
+        couleur = get_couleur_pin(score, statut)
         titre = row.get("intitule", "Offre") or "Offre"
         entreprise = row.get("entreprise_nom", "") or ""
         lieu = row.get("lieu_travail", "") or ""
@@ -519,10 +555,10 @@ def afficher_carte(df):
             popup=folium.Popup(popup_html, max_width=300),
             tooltip=f"{titre} — {entreprise} ({score}/100)",
             icon=folium.Icon(color=couleur, icon="briefcase", prefix="fa"),
-        ).add_to(m)
+        ).add_to(cluster)
         nb_pins += 1
 
-    st.caption(f"{nb_pins} offres géolocalisées sur {len(df)} au total")
+    st.caption(f"{nb_pins} offres géolocalisées sur {len(df_carte)} filtrées ({len(df)} au total)")
     st_folium(m, width=None, height=600, returned_objects=[])
 
 
