@@ -575,13 +575,59 @@ def afficher_carte(df):
                 offre = dict(offre_row)
                 st.divider()
                 st.subheader(f"📌 {offre['intitule']} — {offre['entreprise_nom']}")
-                col1, col2, col3 = st.columns(3)
+
+                col1, col2, col3, col4 = st.columns(4)
                 col1.metric("Score", f"{offre['score']}/100")
                 col2.markdown(f"**Lieu :** {offre.get('lieu_travail') or '—'}")
                 col3.markdown(f"**Contrat :** {offre.get('type_contrat') or '—'}")
+                col4.markdown(f"**Source :** {offre.get('source') or '—'}")
+
                 st.markdown(f"**Analyse :** {offre.get('score_explication') or '—'}")
-                if offre.get("url"):
-                    st.link_button("Ouvrir l'offre", offre["url"])
+
+                col_actions1, col_actions2, _ = st.columns([2, 2, 1])
+
+                with col_actions1:
+                    statuts_liste = ["À postuler", "Postulé", "Entretien", "Refusé"]
+                    statut_actuel = offre.get("statut") or "À postuler"
+                    if statut_actuel not in statuts_liste:
+                        statut_actuel = "À postuler"
+                    nouveau_statut = st.selectbox(
+                        "Statut",
+                        statuts_liste,
+                        index=statuts_liste.index(statut_actuel),
+                        key=f"carte_statut_{offre['id']}",
+                    )
+                    if nouveau_statut != statut_actuel:
+                        mettre_a_jour_statut(offre["id"], nouveau_statut, DB_PATH)
+                        st.rerun()
+
+                with col_actions2:
+                    if offre.get("url"):
+                        st.markdown("&nbsp;")
+                        st.link_button("🔗 Ouvrir l'offre", offre["url"], use_container_width=True)
+
+                with st.expander("Points clés"):
+                    col_pf, col_pfai = st.columns(2)
+                    with col_pf:
+                        st.markdown("**Points forts**")
+                        try:
+                            points_forts = json.loads(offre.get("score_points_forts") or "[]")
+                            for p in points_forts:
+                                st.markdown(f"✅ {p}")
+                            if not points_forts:
+                                st.write("—")
+                        except (json.JSONDecodeError, TypeError):
+                            st.write("—")
+                    with col_pfai:
+                        st.markdown("**Points faibles**")
+                        try:
+                            points_faibles = json.loads(offre.get("score_points_faibles") or "[]")
+                            for p in points_faibles:
+                                st.markdown(f"❌ {p}")
+                            if not points_faibles:
+                                st.write("—")
+                        except (json.JSONDecodeError, TypeError):
+                            st.write("—")
 
 
 # ─────────────────────────────────────────────
