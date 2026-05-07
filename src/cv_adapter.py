@@ -13,6 +13,11 @@ Ce script :
 5. Génère un fichier HTML adapté — ouvrir dans le navigateur et imprimer en A4
 """
 
+import sys
+import io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+
 import argparse
 import logging
 import os
@@ -33,7 +38,7 @@ from scorer import formater_profil
 
 load_dotenv()
 
-console = Console()
+console = Console(legacy_windows=False)
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -100,7 +105,7 @@ def main():
     args = parser.parse_args()
 
     console.print("\n[bold cyan]Agent de Recherche d'Emploi — Adaptation CV[/bold cyan]")
-    console.print("━" * 50)
+    console.print("-" * 50)
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -157,6 +162,12 @@ def main():
     console.print("[dim]Chargement du portfolio...[/dim]")
     contenu_portfolio = charger_portfolio(portfolio_path)
 
+    # Supprime le CSS du CV pour alléger le prompt — Claude n'a pas besoin du CSS pour adapter le contenu
+    soup_cv = BeautifulSoup(cv_base_html, "html.parser")
+    for tag in soup_cv.find_all("style"):
+        tag.decompose()
+    cv_base_sans_css = str(soup_cv)
+
     contexte_candidat = f"""
 == PROFIL YAML ==
 {profil_texte}
@@ -184,24 +195,33 @@ Points faibles à compenser : {offre.get('score_points_faibles', '')}
 Utilise ces informations pour enrichir les descriptions d'expériences et de projets avec des détails concrets, des chiffres et des résultats réels issus du portfolio. Ne fabrique rien qui n'y soit pas mentionné.
 
 == CV HTML DE BASE ==
-{cv_base_html}
+{cv_base_sans_css}
 
-Instructions :
+Instructions STRICTES — à respecter absolument :
+- Le CV DOIT tenir sur UNE SEULE PAGE A4 (297mm × 210mm, padding 32px 42px)
+- L'accroche doit faire 2/3 phrases maximum, 40 mots maximum
+- Pour les expériences : maximum 3 bullet points par expérience, chaque bullet maximum 1 ligne (≈ 90 caractères)
+- Pour les projets : maximum 1 bullet point par projet, 1 ligne maximum
+- Si nécessaire, supprime les projets les moins pertinents pour l'offre — garde maximum 2 projets
+- Formation : garde uniquement le diplôme principal et les certifications clés (Voltaire, TOEIC)
+- Compétences : garde maximum 4 catégories, maximum 6 items par catégorie
+- Si besoin, supprime la section "Formation Agents IA · Orange Innovation" — c'est redondant avec l'expérience
 - Conserve la structure HTML et le style CSS intégralement
-- Reformule l'accroche pour correspondre exactement au poste et à l'entreprise
+- Reformule l'accroche pour correspondre exactement au poste et à l'entreprise en 2 phrases max
 - Réordonne et reformule les compétences pour mettre en avant celles demandées par l'offre
 - Adapte les descriptions d'expériences avec le vocabulaire de l'offre
-- Enrichis les descriptions de projets avec les détails concrets trouvés dans le portfolio (résultats chiffrés, technologies utilisées, contexte)
-- Compense les points faibles identifiés dans l'analyse en mettant en valeur les éléments du portfolio qui y répondent
 - Ne fabrique aucune information absente du profil, du CV de base ou du portfolio
 - Retourne uniquement le HTML complet, sans commentaires ni backticks
+- Utilise tout l'espace disponible sur la page — si de l'espace reste en bas, enrichis les bullet points existants avec des détails supplémentaires pertinents pour l'offre plutôt que de laisser du blanc
+- Pour l'accroche : mentionne explicitement le nom de l'entreprise cible et le domaine spécifique du poste dans la première phrase
+- Renomme "Développeur Auto-Entrepreneur · Cycle Produit Complet" en "Auto-Entrepreneur · Développement Produit IA & Web"
 """
 
     console.print("\n[bold cyan]Adaptation avec Claude Sonnet (streaming)...[/bold cyan]\n")
 
     with client.messages.stream(
         model="claude-sonnet-4-6",
-        max_tokens=4096,
+        max_tokens=8000,
         messages=[{"role": "user", "content": prompt}]
     ) as stream:
         cv_adapte = ""
@@ -212,6 +232,17 @@ Instructions :
     if "<" in cv_adapte:
         cv_adapte = cv_adapte[cv_adapte.index("<"):]
     cv_adapte = cv_adapte.strip().strip("```html").strip("```").strip()
+
+    # Réinjecte le CSS original dans le HTML généré par Claude
+    soup_original = BeautifulSoup(cv_base_html, "html.parser")
+    style_original = soup_original.find("style")
+    soup_adapte = BeautifulSoup(cv_adapte, "html.parser")
+    head = soup_adapte.find("head")
+    if head and style_original:
+        for s in soup_adapte.find_all("style"):
+            s.decompose()
+        head.insert(0, style_original)
+        cv_adapte = str(soup_adapte)
 
     console.print("\n")
     os.makedirs(os.path.dirname(chemin_sortie) or ".", exist_ok=True)

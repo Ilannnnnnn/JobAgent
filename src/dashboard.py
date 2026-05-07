@@ -125,6 +125,7 @@ def deriver_source(url: str) -> str:
     if "indeed" in url:             return "Indeed"
     if "welcometothejungle" in url: return "Wttj"
     if "google" in url:             return "Google"
+    if "linkedin.com/comm" in url or "linkedin.com/jobs" in url: return "Linkedin"
     return "N/A"
 
 
@@ -155,7 +156,7 @@ def charger_offres(db_path: str) -> pd.DataFrame:
     """Charge toutes les offres scorées depuis la DB."""
     with get_connection(db_path) as conn:
         rows = conn.execute(
-            "SELECT * FROM offres WHERE score IS NOT NULL AND score >= 0 ORDER BY score DESC"
+            "SELECT * FROM offres WHERE score >= 0 OR score IS NULL ORDER BY COALESCE(score, 0) DESC"
         ).fetchall()
     if not rows:
         return pd.DataFrame()
@@ -469,6 +470,7 @@ def main():
         return
 
     # Colonnes dérivées
+    df_complet["score"] = df_complet["score"].fillna(0).astype(int)
     df_complet["Source"] = df_complet["source"].str.capitalize().fillna("Inconnu")
     df_complet["Priorité"] = df_complet["score"].apply(deriver_priorite)
     df_complet["statut"] = df_complet["statut"].fillna("À postuler")
@@ -674,12 +676,15 @@ def main():
             # Adapter le CV
             if st.button("Postuler (adapter CV)", key=f"cv_{offre['id']}", use_container_width=True):
                 with st.spinner("Adaptation du CV en cours..."):
+                    env = os.environ.copy()
+                    env["PYTHONIOENCODING"] = "utf-8"
                     result = subprocess.run(
-                        ["python", "src/cv_adapter.py", "--offre-id", offre["id"]],
+                        [sys.executable, "src/cv_adapter.py", "--offre-id", offre["id"]],
                         capture_output=True,
                         text=True,
                         encoding="utf-8",
                         errors="replace",
+                        env=env,
                     )
                 if result.returncode == 0:
                     offre_id_court = offre["id"].replace("adzuna_", "")[:12]
@@ -710,9 +715,7 @@ def main():
 
                     from scorer import scorer_offre, mettre_a_jour_score, formater_profil
                     import yaml
-                    from langchain_google_genai import ChatGoogleGenerativeAI
 
-                    api_key = os.getenv("GOOGLE_AI_STUDIO_KEY")
                     profil_path = os.getenv("PROFILE_PATH", "config/profile.yaml")
                     with open(profil_path, encoding="utf-8") as f:
                         profil = yaml.safe_load(f)
@@ -723,23 +726,15 @@ def main():
                             "SELECT * FROM offres WHERE id = ?", (offre["id"],)
                         ).fetchone()
 
-                    if offre_row and api_key:
-                        llm = ChatGoogleGenerativeAI(
-                            model="gemini-3.1-flash-lite-preview",
-                            google_api_key=api_key,
-                            temperature=0.2,
-                            max_output_tokens=1024,
-                        )
+                    if offre_row:
                         score, explication, points_forts, points_faibles = scorer_offre(
-                            offre_row, profil_texte, llm
+                            offre_row, profil_texte
                         )
                         mettre_a_jour_score(
                             offre["id"], score, explication, points_forts, points_faibles, DB_PATH
                         )
                         st.success(f"✓ Offre enrichie et rescorée : {score}/100")
                         st.rerun()
-                    elif not api_key:
-                        st.error("GOOGLE_AI_STUDIO_KEY manquante dans .env")
                 else:
                     st.warning("La description est vide.")
 
