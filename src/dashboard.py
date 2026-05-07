@@ -550,16 +550,38 @@ def afficher_carte(df):
         </div>
         """
 
+        offre_id = row.get("id", "") or ""
         folium.Marker(
             location=coords,
             popup=folium.Popup(popup_html, max_width=300),
-            tooltip=f"{titre} — {entreprise} ({score}/100)",
+            tooltip=f"[{offre_id}] {titre} — {entreprise} ({score}/100)",
             icon=folium.Icon(color=couleur, icon="briefcase", prefix="fa"),
         ).add_to(cluster)
         nb_pins += 1
 
     st.caption(f"{nb_pins} offres géolocalisées sur {len(df_carte)} filtrées ({len(df)} au total)")
-    st_folium(m, width=None, height=600, returned_objects=[])
+    map_data = st_folium(m, width=None, height=600, returned_objects=["last_object_clicked_tooltip"])
+
+    if map_data and map_data.get("last_object_clicked_tooltip"):
+        tooltip_clique = map_data["last_object_clicked_tooltip"]
+        match = re.search(r'\[([^\]]+)\]', tooltip_clique)
+        if match:
+            offre_id_clique = match.group(1)
+            with get_connection(DB_PATH) as conn:
+                offre_row = conn.execute(
+                    "SELECT * FROM offres WHERE id = ?", (offre_id_clique,)
+                ).fetchone()
+            if offre_row:
+                offre = dict(offre_row)
+                st.divider()
+                st.subheader(f"📌 {offre['intitule']} — {offre['entreprise_nom']}")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Score", f"{offre['score']}/100")
+                col2.markdown(f"**Lieu :** {offre.get('lieu_travail') or '—'}")
+                col3.markdown(f"**Contrat :** {offre.get('type_contrat') or '—'}")
+                st.markdown(f"**Analyse :** {offre.get('score_explication') or '—'}")
+                if offre.get("url"):
+                    st.link_button("Ouvrir l'offre", offre["url"])
 
 
 # ─────────────────────────────────────────────
