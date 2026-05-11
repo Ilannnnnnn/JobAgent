@@ -330,6 +330,7 @@ Offre :
         "url": url,
         "raw_json": json.dumps(offre_dict, ensure_ascii=False),
         "source": "manuel",
+        "collected_at": datetime.now().strftime("%Y-%m-%d"),
     }
 
     with get_connection(db_path) as conn:
@@ -337,10 +338,12 @@ Offre :
             """
             INSERT OR IGNORE INTO offres
             (id, intitule, description, entreprise_nom, lieu_travail,
-             type_contrat, salaire_libelle, date_creation, url, raw_json, source)
+             type_contrat, salaire_libelle, date_creation, url, raw_json, source,
+             collected_at)
             VALUES
             (:id, :intitule, :description, :entreprise_nom, :lieu_travail,
-             :type_contrat, :salaire_libelle, :date_creation, :url, :raw_json, :source)
+             :type_contrat, :salaire_libelle, :date_creation, :url, :raw_json, :source,
+             :collected_at)
             """,
             offre_db,
         )
@@ -684,6 +687,30 @@ def main():
                     st.sidebar.error(f"Erreur : {exc}")
 
     st.sidebar.divider()
+    st.sidebar.markdown("### 🗑️ Nettoyage")
+    jours_max = st.sidebar.slider("Supprimer les offres de plus de", 7, 90, 30, step=7, format="%d jours")
+
+    if st.sidebar.button("Supprimer les vieilles offres", type="secondary"):
+        with get_connection(DB_PATH) as conn:
+            nb = conn.execute("""
+                SELECT COUNT(*) FROM offres
+                WHERE collected_at <= date('now', ? || ' days')
+                AND (statut IS NULL OR statut NOT IN ('Postulé', 'Entretien'))
+            """, (f"-{jours_max}",)).fetchone()[0]
+
+            if nb == 0:
+                st.sidebar.info("Aucune offre à supprimer.")
+            else:
+                conn.execute("""
+                    DELETE FROM offres
+                    WHERE collected_at <= date('now', ? || ' days')
+                    AND (statut IS NULL OR statut NOT IN ('Postulé', 'Entretien'))
+                """, (f"-{jours_max}",))
+                conn.commit()
+                st.sidebar.success(f"✓ {nb} offres supprimées (> {jours_max} jours, non postulées)")
+                st.rerun()
+
+    st.sidebar.divider()
 
     if st.sidebar.button("Lancer le pipeline", type="primary"):
         with st.sidebar.expander("Logs pipeline", expanded=True):
@@ -781,9 +808,13 @@ def main():
             df_filtre["date_postulation"] = ""
         df_filtre["date_postulation"] = df_filtre["date_postulation"].fillna("")
 
+        if "collected_at" not in df_filtre.columns:
+            df_filtre["collected_at"] = ""
+        df_filtre["collected_at"] = df_filtre["collected_at"].fillna("")
+
         cols_affichage = ["score", "Priorité", "intitule", "entreprise_nom",
                           "lieu_travail", "type_contrat", "salaire_libelle",
-                          "Source", "statut", "date_postulation", "url"]
+                          "Source", "statut", "date_postulation", "collected_at", "url"]
         rename_map = {
             "score": "Score",
             "intitule": "Poste",
@@ -793,6 +824,7 @@ def main():
             "salaire_libelle": "Salaire",
             "statut": "Statut",
             "date_postulation": "Postulé le",
+            "collected_at": "Ajouté le",
             "url": "URL",
         }
 
