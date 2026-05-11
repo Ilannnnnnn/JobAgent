@@ -986,11 +986,6 @@ def main():
                             )
                             conn.commit()
 
-                        from scorer import scorer_offre, mettre_a_jour_score, formater_profil
-                        import yaml
-                        from langchain_google_genai import ChatGoogleGenerativeAI
-
-                        api_key = os.getenv("GOOGLE_AI_STUDIO_KEY")
                         profil_path = os.getenv("PROFILE_PATH", "config/profile.yaml")
                         with open(profil_path, encoding="utf-8") as f:
                             profil = yaml.safe_load(f)
@@ -1001,23 +996,11 @@ def main():
                                 "SELECT * FROM offres WHERE id = ?", (offre["id"],)
                             ).fetchone()
 
-                        if offre_row and api_key:
-                            llm = ChatGoogleGenerativeAI(
-                                model="gemini-3.1-flash-lite-preview",
-                                google_api_key=api_key,
-                                temperature=0.2,
-                                max_output_tokens=1024,
-                            )
-                            score, explication, points_forts, points_faibles = scorer_offre(
-                                offre_row, profil_texte, llm
-                            )
-                            mettre_a_jour_score(
-                                offre["id"], score, explication, points_forts, points_faibles, DB_PATH
-                            )
+                        if offre_row:
+                            score, explication, points_forts, points_faibles = scorer_offre(offre_row, profil_texte)
+                            mettre_a_jour_score(offre["id"], score, explication, points_forts, points_faibles, DB_PATH)
                             st.success(f"✓ Offre enrichie et rescorée : {score}/100")
                             st.rerun()
-                        elif not api_key:
-                            st.error("GOOGLE_AI_STUDIO_KEY manquante dans .env")
                     else:
                         st.warning("La description est vide.")
 
