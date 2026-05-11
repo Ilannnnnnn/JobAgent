@@ -146,13 +146,6 @@ def mettre_a_jour_statut(offre_id: str, nouveau_statut: str, db_path: str) -> No
         conn.commit()
 
 
-def deriver_priorite(score: int) -> str:
-    if score >= 85:
-        return "★★★ PRIORITAIRE"
-    if score >= 60:
-        return "★★ À CONSIDÉRER"
-    return "★ FAIBLE"
-
 
 def charger_offres(db_path: str) -> pd.DataFrame:
     """Charge toutes les offres scorées depuis la DB."""
@@ -744,7 +737,6 @@ def main():
     # Colonnes dérivées
     df_complet["score"] = df_complet["score"].fillna(0).astype(int)
     df_complet["Source"] = df_complet["source"].str.capitalize().fillna("Inconnu")
-    df_complet["Priorité"] = df_complet["score"].apply(deriver_priorite)
     df_complet["statut"] = df_complet["statut"].fillna("À postuler")
 
     # Normalisation contrat pour le filtre
@@ -812,7 +804,7 @@ def main():
             df_filtre["collected_at"] = ""
         df_filtre["collected_at"] = df_filtre["collected_at"].fillna("")
 
-        cols_affichage = ["score", "Priorité", "intitule", "entreprise_nom",
+        cols_affichage = ["score", "intitule", "entreprise_nom",
                           "lieu_travail", "type_contrat", "salaire_libelle",
                           "Source", "statut", "date_postulation", "collected_at", "url"]
         rename_map = {
