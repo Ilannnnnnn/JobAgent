@@ -330,6 +330,7 @@ Offre :
         "url": url,
         "raw_json": json.dumps(offre_dict, ensure_ascii=False),
         "source": "manuel",
+        "collected_at": datetime.now().strftime("%Y-%m-%d"),
     }
 
     with get_connection(db_path) as conn:
@@ -337,10 +338,12 @@ Offre :
             """
             INSERT OR IGNORE INTO offres
             (id, intitule, description, entreprise_nom, lieu_travail,
-             type_contrat, salaire_libelle, date_creation, url, raw_json, source)
+             type_contrat, salaire_libelle, date_creation, url, raw_json, source,
+             collected_at)
             VALUES
             (:id, :intitule, :description, :entreprise_nom, :lieu_travail,
-             :type_contrat, :salaire_libelle, :date_creation, :url, :raw_json, :source)
+             :type_contrat, :salaire_libelle, :date_creation, :url, :raw_json, :source,
+             :collected_at)
             """,
             offre_db,
         )
@@ -460,8 +463,14 @@ def get_coords(lieu: str):
     return None
 
 
-def get_couleur_pin(score):
-    """Couleur du pin selon le score."""
+def get_couleur_pin(score, statut=None):
+    """Couleur du pin selon le statut puis le score."""
+    if statut == "Postulé":
+        return "blue"
+    if statut == "Entretien":
+        return "purple"
+    if statut == "Refusé":
+        return "gray"
     if score is None or score < 0:
         return "gray"
     if score >= 85:
@@ -472,24 +481,54 @@ def get_couleur_pin(score):
 
 
 def afficher_carte(df):
+    from folium.plugins import MarkerCluster
+
     st.subheader("Carte des offres")
 
+    # Filtres statut
+    st.markdown("**Afficher les statuts :**")
+    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+    show_a_postuler = col_s1.checkbox("📋 À postuler", value=True)
+    show_postule = col_s2.checkbox("✅ Postulé", value=True)
+    show_entretien = col_s3.checkbox("🎯 Entretien", value=True)
+    show_refuse = col_s4.checkbox("❌ Refusé", value=False)
+
+    statuts_affiches = []
+    if show_a_postuler:
+        statuts_affiches.append("À postuler")
+    if show_postule:
+        statuts_affiches.append("Postulé")
+    if show_entretien:
+        statuts_affiches.append("Entretien")
+    if show_refuse:
+        statuts_affiches.append("Refusé")
+
+    # Légende
     col1, col2, col3, col4 = st.columns(4)
     col1.markdown("🟢 **Prioritaire** (≥ 85)")
     col2.markdown("🟠 **À considérer** (60–84)")
     col3.markdown("🔴 **Faible** (< 60)")
-    col4.markdown("⚪ **Non scorée**")
+    col4.markdown("🔵 **Postulé** · 🟣 **Entretien**")
+
+    # Tri par score décroissant + limite
+    df_carte = df.sort_values("score", ascending=False).head(300)
+    if statuts_affiches:
+        df_carte = df_carte[df_carte["statut"].isin(statuts_affiches)]
 
     m = folium.Map(location=[48.0, 8.0], zoom_start=5, tiles="CartoDB positron")
+    cluster = MarkerCluster(
+        options={"maxClusterRadius": 40, "disableClusteringAtZoom": 8}
+    ).add_to(m)
 
     nb_pins = 0
-    for _, row in df.iterrows():
+    for _, row in df_carte.iterrows():
         coords = get_coords(str(row.get("lieu_travail", "") or ""))
         if not coords:
             continue
 
         score = row.get("score", None)
-        couleur = get_couleur_pin(score)
+        statut = row.get("statut", "") or ""
+        couleur = get_couleur_pin(score, statut)
         titre = row.get("intitule", "Offre") or "Offre"
         entreprise = row.get("entreprise_nom", "") or ""
         lieu = row.get("lieu_travail", "") or ""
@@ -514,16 +553,84 @@ def afficher_carte(df):
         </div>
         """
 
+        offre_id = row.get("id", "") or ""
         folium.Marker(
             location=coords,
             popup=folium.Popup(popup_html, max_width=300),
-            tooltip=f"{titre} — {entreprise} ({score}/100)",
+            tooltip=f"[{offre_id}] {titre} — {entreprise} ({score}/100)",
             icon=folium.Icon(color=couleur, icon="briefcase", prefix="fa"),
-        ).add_to(m)
+        ).add_to(cluster)
         nb_pins += 1
 
-    st.caption(f"{nb_pins} offres géolocalisées sur {len(df)} au total")
-    st_folium(m, width=None, height=600, returned_objects=[])
+    st.caption(f"{nb_pins} offres géolocalisées sur {len(df_carte)} filtrées ({len(df)} au total)")
+    map_data = st_folium(m, width=None, height=600, returned_objects=["last_object_clicked_tooltip"])
+
+    if map_data and map_data.get("last_object_clicked_tooltip"):
+        tooltip_clique = map_data["last_object_clicked_tooltip"]
+        match = re.search(r'\[([^\]]+)\]', tooltip_clique)
+        if match:
+            offre_id_clique = match.group(1)
+            with get_connection(DB_PATH) as conn:
+                offre_row = conn.execute(
+                    "SELECT * FROM offres WHERE id = ?", (offre_id_clique,)
+                ).fetchone()
+            if offre_row:
+                offre = dict(offre_row)
+                st.divider()
+                st.subheader(f"📌 {offre['intitule']} — {offre['entreprise_nom']}")
+
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Score", f"{offre['score']}/100")
+                col2.markdown(f"**Lieu :** {offre.get('lieu_travail') or '—'}")
+                col3.markdown(f"**Contrat :** {offre.get('type_contrat') or '—'}")
+                col4.markdown(f"**Source :** {offre.get('source') or '—'}")
+
+                st.markdown(f"**Analyse :** {offre.get('score_explication') or '—'}")
+
+                col_actions1, col_actions2, _ = st.columns([2, 2, 1])
+
+                with col_actions1:
+                    statuts_liste = ["À postuler", "Postulé", "Entretien", "Refusé"]
+                    statut_actuel = offre.get("statut") or "À postuler"
+                    if statut_actuel not in statuts_liste:
+                        statut_actuel = "À postuler"
+                    nouveau_statut = st.selectbox(
+                        "Statut",
+                        statuts_liste,
+                        index=statuts_liste.index(statut_actuel),
+                        key=f"carte_statut_{offre['id']}",
+                    )
+                    if nouveau_statut != statut_actuel:
+                        mettre_a_jour_statut(offre["id"], nouveau_statut, DB_PATH)
+                        st.rerun()
+
+                with col_actions2:
+                    if offre.get("url"):
+                        st.markdown("&nbsp;")
+                        st.link_button("🔗 Ouvrir l'offre", offre["url"], use_container_width=True)
+
+                with st.expander("Points clés"):
+                    col_pf, col_pfai = st.columns(2)
+                    with col_pf:
+                        st.markdown("**Points forts**")
+                        try:
+                            points_forts = json.loads(offre.get("score_points_forts") or "[]")
+                            for p in points_forts:
+                                st.markdown(f"✅ {p}")
+                            if not points_forts:
+                                st.write("—")
+                        except (json.JSONDecodeError, TypeError):
+                            st.write("—")
+                    with col_pfai:
+                        st.markdown("**Points faibles**")
+                        try:
+                            points_faibles = json.loads(offre.get("score_points_faibles") or "[]")
+                            for p in points_faibles:
+                                st.markdown(f"❌ {p}")
+                            if not points_faibles:
+                                st.write("—")
+                        except (json.JSONDecodeError, TypeError):
+                            st.write("—")
 
 
 # ─────────────────────────────────────────────
@@ -578,6 +685,30 @@ def main():
                     st.rerun()
                 except Exception as exc:
                     st.sidebar.error(f"Erreur : {exc}")
+
+    st.sidebar.divider()
+    st.sidebar.markdown("### 🗑️ Nettoyage")
+    jours_max = st.sidebar.slider("Supprimer les offres de plus de", 7, 90, 30, step=7, format="%d jours")
+
+    if st.sidebar.button("Supprimer les vieilles offres", type="secondary"):
+        with get_connection(DB_PATH) as conn:
+            nb = conn.execute("""
+                SELECT COUNT(*) FROM offres
+                WHERE collected_at <= date('now', ? || ' days')
+                AND (statut IS NULL OR statut NOT IN ('Postulé', 'Entretien'))
+            """, (f"-{jours_max}",)).fetchone()[0]
+
+            if nb == 0:
+                st.sidebar.info("Aucune offre à supprimer.")
+            else:
+                conn.execute("""
+                    DELETE FROM offres
+                    WHERE collected_at <= date('now', ? || ' days')
+                    AND (statut IS NULL OR statut NOT IN ('Postulé', 'Entretien'))
+                """, (f"-{jours_max}",))
+                conn.commit()
+                st.sidebar.success(f"✓ {nb} offres supprimées (> {jours_max} jours, non postulées)")
+                st.rerun()
 
     st.sidebar.divider()
 
@@ -677,9 +808,13 @@ def main():
             df_filtre["date_postulation"] = ""
         df_filtre["date_postulation"] = df_filtre["date_postulation"].fillna("")
 
+        if "collected_at" not in df_filtre.columns:
+            df_filtre["collected_at"] = ""
+        df_filtre["collected_at"] = df_filtre["collected_at"].fillna("")
+
         cols_affichage = ["score", "Priorité", "intitule", "entreprise_nom",
                           "lieu_travail", "type_contrat", "salaire_libelle",
-                          "Source", "statut", "date_postulation", "url"]
+                          "Source", "statut", "date_postulation", "collected_at", "url"]
         rename_map = {
             "score": "Score",
             "intitule": "Poste",
@@ -689,6 +824,7 @@ def main():
             "salaire_libelle": "Salaire",
             "statut": "Statut",
             "date_postulation": "Postulé le",
+            "collected_at": "Ajouté le",
             "url": "URL",
         }
 

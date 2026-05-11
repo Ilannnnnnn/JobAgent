@@ -427,6 +427,7 @@ def _unifier_vers_db(offre: dict) -> dict:
         "date_creation": offre["date_publication"],
         "url": url,
         "raw_json": json.dumps(offre, ensure_ascii=False),
+        "collected_at": datetime.now().strftime("%Y-%m-%d"),
     }
 
 
@@ -582,15 +583,18 @@ Contenu disponible :
             "url": url,
             "raw_json": json.dumps(offre_dict, ensure_ascii=False),
             "source": "linkedin",
+            "collected_at": datetime.now().strftime("%Y-%m-%d"),
         }
         with get_connection(db_path) as conn:
             cursor = conn.execute("""
                 INSERT OR IGNORE INTO offres
                 (id, intitule, description, entreprise_nom, lieu_travail,
-                 type_contrat, salaire_libelle, date_creation, url, raw_json, source)
+                 type_contrat, salaire_libelle, date_creation, url, raw_json, source,
+                 collected_at)
                 VALUES
                 (:id, :intitule, :description, :entreprise_nom, :lieu_travail,
-                 :type_contrat, :salaire_libelle, :date_creation, :url, :raw_json, :source)
+                 :type_contrat, :salaire_libelle, :date_creation, :url, :raw_json, :source,
+                 :collected_at)
             """, offre_db)
             conn.commit()
             if cursor.rowcount == 0:

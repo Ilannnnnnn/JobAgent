@@ -92,6 +92,19 @@ def init_db(db_path: str = DB_PATH_DEFAUT) -> None:
         except sqlite3.OperationalError:
             pass  # Colonne déjà présente
 
+        # Ajout de la colonne collected_at (ignoré si elle existe déjà)
+        try:
+            conn.execute("ALTER TABLE offres ADD COLUMN collected_at TEXT")
+        except sqlite3.OperationalError:
+            pass  # Colonne déjà présente
+
+        # Initialise les offres sans date avec aujourd'hui
+        conn.execute("""
+            UPDATE offres
+            SET collected_at = date('now')
+            WHERE collected_at IS NULL OR collected_at = ''
+        """)
+
         # Migration : déduit la source depuis l'id pour les lignes sans valeur
         conn.execute("""
             UPDATE offres SET source =
