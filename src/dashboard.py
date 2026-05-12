@@ -127,6 +127,7 @@ def deriver_source(url: str) -> str:
     if "indeed" in url:             return "Indeed"
     if "welcometothejungle" in url: return "Wttj"
     if "google" in url:             return "Google"
+    if "glassdoor" in url:          return "Glassdoor"
     if "linkedin.com/comm" in url or "linkedin.com/jobs" in url: return "Linkedin"
     return "N/A"
 
@@ -645,7 +646,7 @@ def main():
 
     score_min = st.sidebar.slider("Score minimum", 0, 100, 60)
 
-    sources_dispo = ["Adzuna", "Indeed", "Apec", "Wttj", "Google", "Manuel", "Linkedin"]
+    sources_dispo = ["Adzuna", "Indeed", "Apec", "Wttj", "Google", "Manuel", "Linkedin", "Linkedin-JS", "Glassdoor"]
     sources = st.sidebar.multiselect("Source", sources_dispo, default=sources_dispo)
 
     contrats_dispo = ["CDI", "CDD", "Freelance", "N/A"]

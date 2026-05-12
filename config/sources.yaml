@@ -77,16 +77,29 @@ apec:
 
 
 # ============================================================
-# Configuration Indeed (via JobSpy)
+# Configuration JobSpy (Indeed, LinkedIn, Glassdoor, Google)
 # ============================================================
 
-indeed:
-  # Nombre d'offres à récupérer
+jobspy:
+  pays:
+    - country: "France"
+      location: "Paris"
+    - country: "Spain"
+      location: "Madrid"
+    - country: "Portugal"
+      location: "Lisbon"
+    - country: "Italy"
+      location: "Milan"
+    - country: "Belgium"
+      location: "Brussels"
+    - country: "Netherlands"
+      location: "Amsterdam"
   results_wanted: 50
-  # Âge maximum des offres en heures
   hours_old: 72
-  # Localisation passée à jobspy
-  location: "France"
+  search_terms:
+    - "AI Engineer"
+    - "Machine Learning Engineer"
+    - "LLM Engineer"
 
 
 # ============================================================
@@ -96,14 +109,6 @@ indeed:
 wttj:
   location: "France"
   max_items: 30
-
-
-# ============================================================
-# Configuration Google Jobs (via JobSpy)
-# ============================================================
-
-google_jobs:
-  enabled: true
 
 
 # ============================================================
