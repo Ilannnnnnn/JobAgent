@@ -361,55 +361,106 @@ def _scraper_wttj(wttj_cfg: dict, apify_token: str, search_term: str) -> list[di
     return offres
 
 
-def _scraper_jobspy(
-    search_term: str,
-    location: str,
-    results_wanted: int = 50,
-    hours_old: int = 72,
-    google_enabled: bool = True,
-) -> list[dict]:
+def _scraper_jobspy() -> list[dict]:
     """
-    Scrape Indeed et Google Jobs via jobspy et retourne les offres au format unifié.
-    results_wanted et hours_old sont lus depuis sources.yaml (section indeed).
-    google_enabled permet d'activer/désactiver Google Jobs (défaut : activé).
-    Retourne [] en cas d'erreur (package absent, réseau, etc.).
+    Scrape Indeed, LinkedIn, Glassdoor et Google Jobs via jobspy pour plusieurs pays européens.
+    Toute la configuration est lue depuis sources.yaml (section jobspy).
+    Lance les runs (search_term × pays) en parallèle et déduplique par URL.
+    Retourne [] en cas d'erreur (package absent, réseau, config vide).
     """
     try:
         from jobspy import scrape_jobs
     except ImportError:
-        logging.error("jobspy non installé — sources Indeed/Google ignorées (pip install python-jobspy)")
+        logging.error("jobspy non installé — sources JobSpy ignorées (pip install python-jobspy)")
         return []
 
-    site_name = ["indeed"] + (["google"] if google_enabled else [])
+    _, sources = charger_config()
+    jobspy_cfg = sources.get("jobspy", {})
 
-    df = scrape_jobs(
-        site_name=site_name,
-        search_term=search_term,
-        google_search_term=f"{search_term} jobs {location}",
-        location=location,
-        results_wanted=results_wanted,
-        hours_old=hours_old,
-        country_indeed="France",
-    )
+    pays_cibles = [(p["country"], p["location"]) for p in jobspy_cfg.get("pays", [])]
+    search_terms = jobspy_cfg.get("search_terms", [])
+    results_wanted = jobspy_cfg.get("results_wanted", 50)
+    hours_old = jobspy_cfg.get("hours_old", 72)
 
-    if df is None or df.empty:
+    if not pays_cibles or not search_terms:
+        logging.warning("jobspy.pays ou jobspy.search_terms vide dans sources.yaml — source JobSpy ignorée")
         return []
 
-    offres = []
-    for row in df.to_dict("records"):
-        url = str(row.get("job_url") or row.get("url", ""))
-        if not url:
-            continue
-        offres.append({
-            "titre": str(row.get("title", "")),
-            "entreprise": str(row.get("company", "")),
-            "localisation": str(row.get("location", "")),
-            "description": str(row.get("description") or row.get("job_description", "")),
-            "url": url,
-            "source": str(row.get("site") or "indeed"),
-            "date_publication": str(row.get("date_posted", "")),
-        })
-    return offres
+    def _run_single(search_term: str, country: str, location: str) -> list[dict]:
+        try:
+            df = scrape_jobs(
+                site_name=["indeed", "linkedin", "glassdoor", "google"],
+                search_term=search_term,
+                location=location,
+                results_wanted=results_wanted,
+                hours_old=hours_old,
+                country_indeed=country,
+                linkedin_fetch_description=False,
+                verbose=0,
+            )
+        except Exception as exc:
+            logging.warning("JobSpy %s/%s '%s' : %s", country, location, search_term, exc)
+            return []
+
+        if df is None or df.empty:
+            return []
+
+        offres = []
+        for row in df.to_dict("records"):
+            url = str(row.get("job_url") or row.get("url", ""))
+            if not url:
+                continue
+
+            site = str(row.get("site", "")).lower().strip()
+            if site == "linkedin":
+                source = "Linkedin-JS"
+            elif site == "indeed":
+                source = "Indeed"
+            elif site == "glassdoor":
+                source = "Glassdoor"
+            elif site == "google":
+                source = "Google"
+            else:
+                source = site.capitalize() if site else "JobSpy"
+
+            min_amt = row.get("min_amount")
+            max_amt = row.get("max_amount")
+            currency = row.get("currency") or ""
+            interval = row.get("interval") or ""
+            if min_amt and max_amt:
+                salaire = f"{int(min_amt)}-{int(max_amt)} {currency}/{interval}".strip("/ ")
+            elif min_amt:
+                salaire = f"dès {int(min_amt)} {currency}/{interval}".strip("/ ")
+            else:
+                salaire = ""
+
+            offres.append({
+                "titre": str(row.get("title", "")),
+                "entreprise": str(row.get("company", "")),
+                "localisation": str(row.get("location", "")),
+                "description": str(row.get("description") or row.get("job_description", "")),
+                "url": url,
+                "source": source,
+                "date_publication": str(row.get("date_posted", "")),
+                "type_contrat": str(row.get("job_type") or ""),
+                "salaire": salaire,
+            })
+        return offres
+
+    runs = [(term, country, loc) for term in search_terms for country, loc in pays_cibles]
+    all_offres: list[dict] = []
+    seen_urls: set[str] = set()
+
+    with ThreadPoolExecutor(max_workers=min(len(runs), 8)) as executor:
+        futures = [executor.submit(_run_single, term, country, loc) for term, country, loc in runs]
+        for future in as_completed(futures):
+            for offre in future.result():
+                if offre["url"] not in seen_urls:
+                    seen_urls.add(offre["url"])
+                    all_offres.append(offre)
+
+    logging.info("JobSpy — %d offres uniques (%d runs)", len(all_offres), len(runs))
+    return all_offres
 
 
 def _unifier_vers_db(offre: dict) -> dict:
@@ -693,18 +744,8 @@ def collecter(state: AgentState) -> AgentState:
     # Paramètres APEC depuis sources.yaml
     apec_cfg = sources.get("apec", {})
 
-    # Paramètres Indeed/Google depuis sources.yaml
-    indeed_cfg = sources.get("indeed", {})
-    indeed_results_wanted = indeed_cfg.get("results_wanted", 50)
-    indeed_hours_old = indeed_cfg.get("hours_old", 72)
-    indeed_location = indeed_cfg.get("location", "France")
-
     # Paramètres WTTJ depuis sources.yaml
     wttj_cfg = sources.get("wttj", {})
-
-    # Paramètres Google Jobs depuis sources.yaml
-    google_cfg = sources.get("google_jobs", {})
-    google_enabled = google_cfg.get("enabled", True)
 
     init_db(db_path)
 
@@ -714,10 +755,7 @@ def collecter(state: AgentState) -> AgentState:
             executor.submit(_scraper_adzuna, app_id, app_key, profil, sources, db_path): "adzuna",
             executor.submit(_scraper_apec, apec_cfg, apify_token): "apec",
             executor.submit(_scraper_wttj, wttj_cfg, apify_token, search_term): "wttj",
-            executor.submit(
-                _scraper_jobspy, search_term, indeed_location,
-                indeed_results_wanted, indeed_hours_old, google_enabled,
-            ): "jobspy",
+            executor.submit(_scraper_jobspy): "jobspy",
         }
         offres_adzuna_nouvelles = 0
         offres_externes: list[dict] = []
