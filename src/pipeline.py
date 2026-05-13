@@ -361,6 +361,22 @@ def _scraper_wttj(wttj_cfg: dict, apify_token: str, search_term: str) -> list[di
     return offres
 
 
+TITRES_EXCLUS = [
+    "chef", "cuisinier", "cuoco", "cameriere", "hr manager", "human resources",
+    "marketing manager", "sales", "account manager", "legal counsel", "sap ",
+    "servicenow", "java senior", "angular", ".net senior", "devops senior",
+    "scrum master", "agile coach", "product owner", "community manager",
+    "financial", "pricing analyst", "data governance", "erp ", "crm ",
+    "kubernetes architect", "infrastructure architect", "system architect",
+    "phd student", "postdoc", "internship", "stage ", "alternance",
+]
+
+
+def titre_est_pertinent(titre: str) -> bool:
+    titre_lower = (titre or "").lower()
+    return not any(exclu in titre_lower for exclu in TITRES_EXCLUS)
+
+
 def _scraper_jobspy() -> list[dict]:
     """
     Scrape Indeed, LinkedIn, Glassdoor et Google Jobs via jobspy pour plusieurs pays européens.
@@ -434,8 +450,12 @@ def _scraper_jobspy() -> list[dict]:
             else:
                 salaire = ""
 
+            titre = str(row.get("title", ""))
+            if not titre_est_pertinent(titre):
+                continue
+
             offres.append({
-                "titre": str(row.get("title", "")),
+                "titre": titre,
                 "entreprise": str(row.get("company", "")),
                 "localisation": str(row.get("location", "")),
                 "description": str(row.get("description") or row.get("job_description", "")),

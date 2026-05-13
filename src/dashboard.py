@@ -874,16 +874,16 @@ def main():
         offre_selectionnee = None
         if selection_a_postuler.selection.rows:
             idx = selection_a_postuler.selection.rows[0]
-            offre_selectionnee = df_a_postuler.iloc[idx]
+            offre_selectionnee = df_a_postuler.iloc[idx].to_dict()
         elif selection_postule.selection.rows:
             idx = selection_postule.selection.rows[0]
-            offre_selectionnee = df_postule.iloc[idx]
+            offre_selectionnee = df_postule.iloc[idx].to_dict()
         elif selection_entretien.selection.rows:
             idx = selection_entretien.selection.rows[0]
-            offre_selectionnee = df_entretien.iloc[idx]
+            offre_selectionnee = df_entretien.iloc[idx].to_dict()
         elif selection_refuse.selection.rows:
             idx = selection_refuse.selection.rows[0]
-            offre_selectionnee = df_refuse.iloc[idx]
+            offre_selectionnee = df_refuse.iloc[idx].to_dict()
 
         if offre_selectionnee is not None:
             offre = offre_selectionnee
