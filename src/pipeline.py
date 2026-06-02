@@ -502,6 +502,22 @@ def _unifier_vers_db(offre: dict) -> dict:
     }
 
 
+CONTENU_INVALIDE = [
+    "cookies to provide",
+    "non-essential cookies",
+    "cookie policy",
+    "we use cookies",
+    "accept cookies",
+]
+
+
+def contenu_linkedin_valide(contenu: str) -> bool:
+    if not contenu or len(contenu.strip()) < 100:
+        return False
+    contenu_lower = contenu.lower()
+    return not any(invalide in contenu_lower for invalide in CONTENU_INVALIDE)
+
+
 def _collecter_emails_linkedin(gmail_address, app_password, expediteurs, label="INBOX", max_emails=20):
     if not gmail_address or not app_password:
         logging.warning("GMAIL_ADDRESS ou GMAIL_APP_PASSWORD manquant")
@@ -584,7 +600,12 @@ def _importer_offre_depuis_url(url: str, db_path: str, profil_texte: str, conten
                 timeout=30,
             )
             contenu = resp.json().get("results", [{}])[0].get("raw_content", "")
-            tavily_ok = bool(contenu)
+            if "linkedin" in url and not contenu_linkedin_valide(contenu):
+                logging.warning("Tavily a retourné un contenu invalide (cookie wall ?) pour %s", url)
+                contenu = ""
+                tavily_ok = False
+            else:
+                tavily_ok = bool(contenu)
         except Exception as tavily_exc:
             logging.warning("Tavily Extract échoué pour %s : %s", url, tavily_exc)
             contenu = ""
